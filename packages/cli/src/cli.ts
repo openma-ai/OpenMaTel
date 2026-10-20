@@ -17,12 +17,19 @@ import os from "node:os";
 import path from "node:path";
 import * as zlib from "node:zlib";
 
+import { createInprocBus } from "@openmatel/bus-inproc";
 import type {
   SessionDetail,
   SessionSummary,
   StepNode,
   TurnNode,
 } from "@openmatel/core";
+import {
+  createPipeline,
+  runLocalIndex,
+  type LocalIndexResult,
+  type LocalIndexSourceStats,
+} from "@openmatel/pipeline";
 import { localSources, type LocalSource } from "@openmatel/source-local";
 
 import {
@@ -390,75 +397,72 @@ export async function runIndex(
   const names = options.sources !== undefined ? [...options.sources] : [...ALL_SOURCES];
 
   const store = await openStore(dataDir);
+  const bus = createInprocBus({ maxAttempts: 5, retryDelayMs: 50 });
+  const pipeline = createPipeline({
+    bus,
+    sinks: [store.sink],
+    ctx: { project_id: "local", capture_level: "full" },
+  });
+
   const results: SourceIndexStats[] = [];
 
   try {
-    for (const name of names) {
-      const source = sourceOf(name);
-      const sourceStarted = Date.now();
-      const stats: SourceIndexStats = {
-        source: name,
-        filesSeen: 0,
-        indexed: 0,
-        skipped: 0,
-        failed: 0,
-        sessions: 0,
-        events: 0,
-        elapsedMs: 0,
-      };
+    const available: LocalSource[] = [];
+    const skippedSources = new Map<string, SourceIndexStats>();
 
+    for (const name of names) {
       if (name === "dsh" && !hasZstdSupport()) {
         err(
           io,
           "warning: dsh requires Node.js zstd support (node:zlib.zstdDecompressSync); skipping dsh",
         );
-        stats.note = "zstd unavailable";
-        stats.elapsedMs = Date.now() - sourceStarted;
-        results.push(stats);
+        skippedSources.set(name, {
+          source: name,
+          filesSeen: 0,
+          indexed: 0,
+          skipped: 0,
+          failed: 0,
+          sessions: 0,
+          events: 0,
+          elapsedMs: 0,
+          note: "zstd unavailable",
+        });
         continue;
       }
+      available.push(sourceOf(name));
+    }
 
-      let files;
-      try {
-        files = await source.discover(home);
-      } catch (error) {
-        stats.failed += 1;
-        err(io, `error: ${name}: discovery failed: ${messageOf(error)}`);
-        stats.elapsedMs = Date.now() - sourceStarted;
-        results.push(stats);
+    const run: LocalIndexResult = await runLocalIndex({
+      home,
+      sources: available,
+      store,
+      cursorStore: store,
+      pipeline,
+      onError: (error, context) => {
+        if (context.stage === "discover") {
+          err(io, `error: ${context.source}: discovery failed: ${messageOf(error)}`);
+          return;
+        }
+        const where = context.file !== undefined ? `${context.file.path}: ` : "";
+        err(io, `error: ${context.source}: ${where}${messageOf(error)}`);
+      },
+    });
+
+    // Keep the result in the order the user selected, including sources that
+    // were skipped as a whole (dsh without zstd support).
+    for (const name of names) {
+      const skipped = skippedSources.get(name);
+      if (skipped !== undefined) {
+        results.push(skipped);
         continue;
       }
-
-      stats.filesSeen = files.length;
-      const sessionIds = new Set<string>();
-
-      for (const file of files) {
-        const cursor = `${file.size}:${file.mtimeMs}`;
-        const cursorKey = `file:${file.path}`;
-        if (store.getCursor(cursorKey) === cursor) {
-          stats.skipped += 1;
-          continue;
-        }
-
-        try {
-          const records = await source.readRecords(file);
-          const events = source.normalizeFile(file, records);
-          await store.sink.write(events);
-          store.setCursor(cursorKey, cursor);
-          stats.indexed += 1;
-          stats.events += events.length;
-          for (const event of events) sessionIds.add(event.session_id);
-        } catch (error) {
-          stats.failed += 1;
-          err(io, `error: ${name}: ${file.path}: ${messageOf(error)}`);
-        }
-      }
-
-      stats.sessions = sessionIds.size;
-      stats.elapsedMs = Date.now() - sourceStarted;
-      results.push(stats);
+      const stats = run.sources.find((source: LocalIndexSourceStats) => source.source === name);
+      if (stats !== undefined) results.push(stats);
     }
   } finally {
+    await pipeline.drain().catch(() => {});
+    pipeline.close();
+    await bus.close();
     await store.close();
   }
 

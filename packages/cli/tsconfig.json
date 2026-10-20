@@ -4,11 +4,27 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"],
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
   "references": [
-    { "path": "../core" },
-    { "path": "../sources/local" },
-    { "path": "../stores/sqlite" }
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../sources/local"
+    },
+    {
+      "path": "../stores/sqlite"
+    },
+    {
+      "path": "../bus/inproc"
+    },
+    {
+      "path": "../pipeline"
+    }
   ]
 }
