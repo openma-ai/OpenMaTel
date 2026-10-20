@@ -1,0 +1,978 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenMaTel Query API",
+    "version": "1.0.0",
+    "description": "Read-only HTTP Query API for OpenMaTel agent-observability sessions, turns and steps. The server is platform-agnostic and receives a Query port from the composition root.",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4319",
+      "description": "Desktop default (loopback only)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Query"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {
+      "cookieAuth": []
+    },
+    {
+      "tokenQuery": []
+    }
+  ],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": ["Health"],
+        "operationId": "getHealth",
+        "summary": "Liveness and server version",
+        "description": "The only public route; it never requires the desktop token.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The server is running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["ok", "version"],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/query/sessions": {
+      "get": {
+        "tags": ["Query"],
+        "operationId": "listSessions",
+        "summary": "List session summaries",
+        "description": "Returns sessions ordered by started_at descending, then session_id ascending. Pagination is keyset-based and opaque.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/Source"
+          },
+          {
+            "$ref": "#/components/parameters/Harness"
+          },
+          {
+            "$ref": "#/components/parameters/HasError"
+          },
+          {
+            "$ref": "#/components/parameters/Text"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of session summaries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageSessionSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/query/sessions/{id}": {
+      "get": {
+        "tags": ["Query"],
+        "operationId": "getSession",
+        "summary": "Get one session with its turn/step tree",
+        "description": "Returns the stored summary and the core buildSessionTree output. Lookup is exact unless the Query implementation opts into prefix lookup with getSessionByPrefix().",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Exact session id, or a prefix when the Query adapter supports prefix lookup.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session summary and its turns.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/query/sessions/{id}/steps": {
+      "get": {
+        "tags": ["Query"],
+        "operationId": "listSessionSteps",
+        "summary": "List the flat steps of a session",
+        "description": "Returns the steps of one session in timestamp order. An unknown session id yields an empty page.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Kind"
+          },
+          {
+            "$ref": "#/components/parameters/Status"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of steps.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageStep"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/query/aggregate/tool-errors": {
+      "get": {
+        "tags": ["Query"],
+        "operationId": "aggregateToolErrors",
+        "summary": "Aggregate tool errors",
+        "description": "Delegates to Query.aggregate(). Returns 501 when the injected Query implementation does not implement aggregate().",
+        "parameters": [
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "description": "Grouping dimension.",
+            "schema": {
+              "type": "string",
+              "enum": ["tool_name", "harness", "model"],
+              "default": "tool_name"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregation result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "description": "The Query implementation does not support aggregate().",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Authorization: Bearer <token>."
+      },
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "omt_token",
+        "description": "HttpOnly, SameSite=Strict cookie set by the token query flow."
+      },
+      "tokenQuery": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "token",
+        "description": "One-time browser login token. A valid value sets the omt_token cookie and redirects to the same URL without token."
+      }
+    },
+    "parameters": {
+      "Project": {
+        "name": "project",
+        "in": "query",
+        "required": false,
+        "description": "Project id.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Source": {
+        "name": "source",
+        "in": "query",
+        "required": false,
+        "description": "Source name, e.g. claude-code.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Harness": {
+        "name": "harness",
+        "in": "query",
+        "required": false,
+        "description": "Harness name, e.g. claude-code.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "HasError": {
+        "name": "has_error",
+        "in": "query",
+        "required": false,
+        "description": "Only sessions that contain (true) or do not contain (false) a failed step.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "Text": {
+        "name": "q",
+        "in": "query",
+        "required": false,
+        "description": "Free-text search over title, cwd and event content.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Kind": {
+        "name": "kind",
+        "in": "query",
+        "required": false,
+        "description": "Only steps of this canonical event kind.",
+        "schema": {
+          "$ref": "#/components/schemas/EventKind"
+        }
+      },
+      "Status": {
+        "name": "status",
+        "in": "query",
+        "required": false,
+        "description": "Only steps with this status.",
+        "schema": {
+          "$ref": "#/components/schemas/StepStatus"
+        }
+      },
+      "From": {
+        "name": "from",
+        "in": "query",
+        "required": false,
+        "description": "Inclusive ISO 8601 lower bound.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "To": {
+        "name": "to",
+        "in": "query",
+        "required": false,
+        "description": "Exclusive ISO 8601 upper bound.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque next_cursor of the previous page.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Maximum number of items in the page.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "An invalid query parameter.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "A token is configured and the request did not present it.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "ForbiddenHost": {
+        "description": "The Host header is not a loopback name (DNS-rebinding protection).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "The requested session or route does not exist.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "An unexpected server error.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message"],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "EventKind": {
+        "type": "string",
+        "enum": [
+          "session.start",
+          "session.end",
+          "turn.start",
+          "turn.end",
+          "message.user",
+          "message.agent",
+          "reasoning",
+          "llm.call",
+          "tool.call",
+          "env.command",
+          "env.file_edit",
+          "env.browser",
+          "subagent.spawn",
+          "handoff",
+          "plan.update",
+          "permission.request",
+          "permission.decision",
+          "control.interrupt",
+          "control.cancel",
+          "control.retry",
+          "control.compaction",
+          "control.resume",
+          "memory.read",
+          "memory.write",
+          "skill.use",
+          "outcome",
+          "raw.unknown"
+        ]
+      },
+      "StepStatus": {
+        "type": "string",
+        "enum": ["ok", "error", "cancelled", "interrupted", "denied", "timeout"]
+      },
+      "SessionStatus": {
+        "type": "string",
+        "enum": ["ok", "error", "cancelled", "interrupted", "denied", "timeout", "unknown"]
+      },
+      "Usage": {
+        "type": "object",
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "reasoning_tokens",
+          "source"
+        ],
+        "properties": {
+          "input_tokens": {
+            "type": ["number", "null"]
+          },
+          "output_tokens": {
+            "type": ["number", "null"]
+          },
+          "cache_read_tokens": {
+            "type": ["number", "null"]
+          },
+          "cache_write_tokens": {
+            "type": ["number", "null"]
+          },
+          "reasoning_tokens": {
+            "type": ["number", "null"]
+          },
+          "source": {
+            "type": "string",
+            "enum": ["provider", "harness", "estimated", "missing"]
+          },
+          "cost_usd": {
+            "type": ["number", "null"]
+          },
+          "cost_source": {
+            "type": ["string", "null"],
+            "enum": ["price_table", "provider", "harness", null]
+          }
+        }
+      },
+      "UsageTotal": {
+        "type": "object",
+        "required": ["total", "calls", "covered", "coverage"],
+        "properties": {
+          "total": {
+            "type": "object",
+            "required": [
+              "input_tokens",
+              "output_tokens",
+              "cache_read_tokens",
+              "cache_write_tokens",
+              "reasoning_tokens",
+              "cost_usd"
+            ],
+            "properties": {
+              "input_tokens": {
+                "type": ["number", "null"]
+              },
+              "output_tokens": {
+                "type": ["number", "null"]
+              },
+              "cache_read_tokens": {
+                "type": ["number", "null"]
+              },
+              "cache_write_tokens": {
+                "type": ["number", "null"]
+              },
+              "reasoning_tokens": {
+                "type": ["number", "null"]
+              },
+              "cost_usd": {
+                "type": ["number", "null"]
+              }
+            }
+          },
+          "calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "covered": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "coverage": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "EventError": {
+        "type": "object",
+        "required": ["type", "message"],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "EventSource": {
+        "type": "object",
+        "required": ["name", "format"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionSummary": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "project_id",
+          "source",
+          "harness",
+          "model",
+          "title",
+          "cwd",
+          "started_at",
+          "ended_at",
+          "turn_count",
+          "step_count",
+          "tool_call_count",
+          "tool_error_count",
+          "subagent_count",
+          "usage",
+          "status"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": ["string", "null"]
+          },
+          "harness": {
+            "type": ["string", "null"]
+          },
+          "model": {
+            "type": ["string", "null"]
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "cwd": {
+            "type": ["string", "null"]
+          },
+          "started_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "turn_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "step_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_call_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_error_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "subagent_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          }
+        }
+      },
+      "Step": {
+        "type": "object",
+        "required": ["step_id", "session_id", "kind", "ts", "attrs", "source"],
+        "properties": {
+          "step_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": ["string", "null"]
+          },
+          "parent_step_id": {
+            "type": ["string", "null"]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end_ts": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "attrs": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "$ref": "#/components/schemas/EventError"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Usage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/EventSource"
+          }
+        }
+      },
+      "StepNode": {
+        "type": "object",
+        "required": ["step_id", "kind", "ts", "attrs", "source", "children"],
+        "properties": {
+          "step_id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end_ts": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "attrs": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "$ref": "#/components/schemas/EventError"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Usage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "source": {
+            "$ref": "#/components/schemas/EventSource"
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StepNode"
+            }
+          }
+        }
+      },
+      "TurnNode": {
+        "type": "object",
+        "required": ["turn_id", "ts", "end_ts", "events", "steps"],
+        "properties": {
+          "turn_id": {
+            "type": "string"
+          },
+          "ts": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "end_ts": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StepNode"
+            }
+          }
+        }
+      },
+      "SessionDetail": {
+        "type": "object",
+        "required": ["summary", "turns"],
+        "properties": {
+          "summary": {
+            "$ref": "#/components/schemas/SessionSummary"
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnNode"
+            }
+          }
+        }
+      },
+      "PageSessionSummary": {
+        "type": "object",
+        "required": ["items", "next_cursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            }
+          },
+          "next_cursor": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "PageStep": {
+        "type": "object",
+        "required": ["items", "next_cursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            }
+          },
+          "next_cursor": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "AggGroup": {
+        "type": "object",
+        "required": ["key", "count"],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          "cost_usd": {
+            "type": ["number", "null"]
+          },
+          "latency_ms": {
+            "type": ["number", "null"]
+          }
+        }
+      },
+      "AggResult": {
+        "type": "object",
+        "required": ["groups", "total"],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AggGroup"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

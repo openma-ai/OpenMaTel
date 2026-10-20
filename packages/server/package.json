@@ -1,0 +1,37 @@
+{
+  "name": "@openmatel/server",
+  "version": "0.1.0",
+  "description": "Platform-agnostic Hono server and Query API v1 of OpenMaTel, plus a Node.js entry point.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openapi.json"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@openmatel/core": "workspace:*",
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@openmatel/contract-tests": "workspace:*",
+    "vitest": "^3"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
