@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test output
+coverage/
+
+# Packaged artifacts
+*.tgz
+
+# Local OpenMaTel state
+.openmatel/
+
+# Environment / local overrides
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+*.log
