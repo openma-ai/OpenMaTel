@@ -9,8 +9,9 @@
  *
  * - `repeated_tool_failure` — the same tool and (roughly) the same input fail
  *   consecutively at least three times;
- * - `loop` — the same tool/input runs at least three times in a turn, or a
- *   short step sequence repeats consecutively at least three times;
+ * - `loop` — the same tool, input and result run consecutively at least three
+ *   times in a turn, or a short sequence of such calls repeats consecutively
+ *   at least three times;
  * - `user_interrupt` — `control.interrupt` / `control.cancel`, or a turn that
  *   ended as `interrupted` / `cancelled`;
  * - `user_correction` — the first user message after an interrupted turn, or
@@ -40,7 +41,7 @@ export interface Signal {
   turn_id: string;
   /** Steps the signal points at, in event order. */
   step_ids: string[];
-  /** Number of repetitions for the repeated/loop signals. */
+  /** Number of repetitions (or consecutive calls) for the repeated/loop signals. */
   count?: number;
   /** Confidence of the heuristic, for `user_correction`. */
   confidence?: number;
@@ -119,11 +120,12 @@ function stableStringify(value: unknown): string {
  * Normalize the input of a tool call for comparison.
  *
  * JSON is canonicalized (sorted keys, no insignificant whitespace), plain text
- * gets its whitespace collapsed. Only the first
- * {@link INPUT_COMPARE_LENGTH} characters take part in the comparison, so a
- * large but nearly identical edit still looks like the same call.
+ * gets its whitespace collapsed. By default only the first
+ * {@link INPUT_COMPARE_LENGTH} characters take part in the comparison, which
+ * keeps the failure heuristic tolerant of large but nearly identical edits;
+ * loop detection passes `truncate: false` so the full value has to match.
  */
-function normalizedInput(event: AgentEvent): string {
+function normalizedInput(event: AgentEvent, truncate = true): string {
   const content = isObject(event.content) ? event.content : undefined;
   const input = isObject(content?.input) ? content.input : undefined;
   let value: unknown = input?.json ?? input?.text ?? event.attrs.input;
@@ -147,58 +149,79 @@ function normalizedInput(event: AgentEvent): string {
   } else {
     text = stableStringify(value);
   }
-  return text.slice(0, INPUT_COMPARE_LENGTH);
+  return truncate ? text.slice(0, INPUT_COMPARE_LENGTH) : text;
 }
 
 /** `true` when a tool call failed. */
 const isFailure = (event: AgentEvent): boolean =>
   event.status === "error" || event.error !== undefined;
 
-/** Key of a tool call for "same tool and same input" comparisons. */
+/** Key of a tool call for "same tool and same input" failure comparisons. */
 const toolKey = (event: AgentEvent): string => {
   const name = asString(event.attrs.tool_name) ?? "";
   return `${name}\u0000${normalizedInput(event)}`;
 };
 
-/** The token a step contributes to the repeated-sequence detector. */
-function sequenceToken(event: AgentEvent): string {
-  if (event.kind === "tool.call") {
-    return `tool.call:${asString(event.attrs.tool_name) ?? ""}`;
+/**
+ * Normalize the result of a tool call for comparison.
+ *
+ * The result is the captured output or the error text; whitespace around each
+ * part is ignored. A call without either has an unknown result and is never
+ * treated as a loop, because two missing results do not prove the calls did
+ * the same thing.
+ */
+function normalizedResult(event: AgentEvent): string | undefined {
+  const content = isObject(event.content) ? event.content : undefined;
+  const output = isObject(content?.output) ? content.output : undefined;
+  const error = isObject(event.error) ? event.error : undefined;
+  const parts: string[] = [];
+
+  if (error !== undefined) {
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    parts.push(`error:${message}`);
   }
-  return event.kind;
+  if (output !== undefined) {
+    if (typeof output.text === "string") {
+      parts.push(`output:text:${output.text.trim()}`);
+    }
+    if (output.json !== undefined) {
+      parts.push(`output:json:${stableStringify(output.json).trim()}`);
+    }
+  }
+
+  return parts.length === 0 ? undefined : parts.join("\u0000");
 }
 
-/** A step reduced to the information the sequence detector needs. */
+/** Key of a tool call for loop comparisons; `undefined` when its result is unknown. */
+const loopKey = (event: AgentEvent): string | undefined => {
+  const result = normalizedResult(event);
+  if (result === undefined) return undefined;
+  const name = asString(event.attrs.tool_name) ?? "";
+  return `${name}\u0000${normalizedInput(event, false)}\u0000${result}`;
+};
+
+/** A tool call reduced to the information the sequence detector needs. */
 interface SequenceStep {
   step_id: string;
-  token: string;
+  token: string | undefined;
+}
+
+/** The tool calls of a turn, in order, with their full loop key. */
+function toolSteps(toolCalls: AgentEvent[]): SequenceStep[] {
+  const steps: SequenceStep[] = [];
+  for (const call of toolCalls) {
+    const stepId = stepOf(call);
+    if (stepId === undefined) continue;
+    steps.push({ step_id: stepId, token: loopKey(call) });
+  }
+  return steps;
 }
 
 /**
- * The steps of a turn, in first-seen order.
- *
- * Several events may describe the same step (a tool call and its result); the
- * last one wins for its token, but the step keeps the position of its first
- * event so the sequence stays the order the agent acted in.
+ * Find a sequence of 2–3 tool calls that repeats consecutively at least 3
+ * times. Every repetition must have the same tool, full input and result; a
+ * call with an unknown result never takes part in a sequence.
  */
-function stepsOfTurn(events: AgentEvent[]): SequenceStep[] {
-  const byId = new Map<string, { token: string; order: number }>();
-  for (const event of events) {
-    if (event.kind === "segment.boundary") continue;
-    const stepId = stepOf(event);
-    if (stepId === undefined) continue;
-    const previous = byId.get(stepId);
-    byId.set(stepId, {
-      token: sequenceToken(event),
-      order: previous?.order ?? byId.size,
-    });
-  }
-  return [...byId.entries()]
-    .sort(([, left], [, right]) => left.order - right.order)
-    .map(([step_id, entry]) => ({ step_id, token: entry.token }));
-}
-
-/** Find a sequence of 2–4 steps that repeats consecutively at least 3 times. */
 function repeatedSequences(steps: SequenceStep[]): Array<{
   step_ids: string[];
   count: number;
@@ -207,14 +230,20 @@ function repeatedSequences(steps: SequenceStep[]): Array<{
   const matches: Array<{ step_ids: string[]; count: number; length: number }> = [];
   const tokens = steps.map((step) => step.token);
 
-  for (let length = 2; length <= 4; length += 1) {
+  for (let length = 2; length <= 3; length += 1) {
     for (let start = 0; start + length * SIGNAL_THRESHOLD <= tokens.length; start += 1) {
+      const period = tokens.slice(start, start + length);
+      if (period.some((token) => token === undefined)) continue;
+      // An all-identical period is just a run of the same call, which the
+      // run detector above already reports (with the maximal run length).
+      if (period.every((token) => token === period[0])) continue;
+
       let repeats = 1;
       while (
         start + length * (repeats + 1) <= tokens.length &&
         tokens
           .slice(start + length * repeats, start + length * (repeats + 1))
-          .every((token, index) => token === tokens[start + index])
+          .every((token, index) => token !== undefined && token === period[index])
       ) {
         repeats += 1;
       }
@@ -274,8 +303,10 @@ export function detectSignals(turnEvents: AgentEvent[]): Signal[] {
   }
 
   const signals = new Map<string, Signal>();
-  const add = (signal: Signal): void => {
-    const key = `${signal.turn_id}\u0000${signal.kind}`;
+  const add = (signal: Signal, runKey?: string): void => {
+    const key = `${signal.turn_id}\u0000${signal.kind}${
+      runKey === undefined ? "" : `\u0000${runKey}`
+    }`;
     const previous = signals.get(key);
     if (!previous) {
       signals.set(key, signal);
@@ -357,44 +388,53 @@ export function detectSignals(turnEvents: AgentEvent[]): Signal[] {
     }
     flushRun();
 
-    // The same tool and input repeated anywhere in the turn, regardless of
-    // status. Failing repeats also match this rule by design.
-    const occurrences = new Map<string, { stepIds: string[]; count: number }>();
+    // A run of consecutive calls with the same tool, full input and result.
+    const loopRuns: Array<{ step_ids: string[]; count: number }> = [];
+    let loopRun: { key: string; stepIds: string[]; count: number } | undefined;
+    const flushLoopRun = (): void => {
+      if (loopRun !== undefined && loopRun.count >= SIGNAL_THRESHOLD) {
+        loopRuns.push({ step_ids: [...loopRun.stepIds], count: loopRun.count });
+      }
+      loopRun = undefined;
+    };
+
     for (const call of toolCalls) {
-      const key = toolKey(call);
-      const entry = occurrences.get(key) ?? { stepIds: [], count: 0 };
-      entry.count += 1;
+      const key = loopKey(call);
       const stepId = stepOf(call);
-      if (stepId !== undefined) entry.stepIds.push(stepId);
-      occurrences.set(key, entry);
-    }
-
-    let loopCount = 0;
-    const loopStepIds: string[] = [];
-    for (const entry of occurrences.values()) {
-      if (entry.count < SIGNAL_THRESHOLD) continue;
-      loopCount = Math.max(loopCount, entry.count);
-      for (const stepId of entry.stepIds) {
-        if (!loopStepIds.includes(stepId)) loopStepIds.push(stepId);
+      if (key !== undefined && loopRun !== undefined && loopRun.key === key) {
+        loopRun.count += 1;
+        if (stepId !== undefined) loopRun.stepIds.push(stepId);
+        continue;
+      }
+      flushLoopRun();
+      if (key !== undefined) {
+        loopRun = { key, stepIds: stepId === undefined ? [] : [stepId], count: 1 };
       }
     }
+    flushLoopRun();
 
-    // A short step sequence that repeats consecutively.
-    const repeated = repeatedSequences(stepsOfTurn(events));
-    for (const match of repeated) {
-      loopCount = Math.max(loopCount, match.count);
-      for (const stepId of match.step_ids) {
-        if (!loopStepIds.includes(stepId)) loopStepIds.push(stepId);
-      }
-    }
+    // A short tool-call sequence that repeats consecutively with the same
+    // tool, full input and result each time.
+    const repeated = repeatedSequences(toolSteps(toolCalls)).map((match) => ({
+      step_ids: match.step_ids,
+      count: match.count,
+    }));
 
-    if (loopStepIds.length > 0) {
-      add({
-        kind: "loop",
-        turn_id: turnId,
-        step_ids: loopStepIds,
-        count: loopCount,
-      });
+    // Every maximal run gets its own signal; do not merge separate runs of a
+    // turn into one aggregate.
+    const loops = [...loopRuns, ...repeated];
+    for (let index = 0; index < loops.length; index += 1) {
+      const loop = loops[index];
+      if (loop === undefined) continue;
+      add(
+        {
+          kind: "loop",
+          turn_id: turnId,
+          step_ids: loop.step_ids,
+          count: loop.count,
+        },
+        `run_${index}`,
+      );
     }
   }
 

@@ -644,7 +644,7 @@ Session
 ### 15.6 自动标记的信号（signals）
 在 turn 和 session 级别计算（存在 `attrs.signals[]`，可以查询）：
 - `repeated_tool_failure`：同一个工具（名称和输入大致相同）连续失败 ≥ 3 次。
-- `loop`：同样的 tool 和输入在一个 turn 里重复 ≥ 3 次，或 N 步内反复出现相同的 step 序列。
+- `loop`：同一个 turn 内连续的 `tool.call` 中，相同工具、相同参数（稳定排序的 JSON，比较完整值）且结果相同（输出或错误文本 trim 后相同；缺少结果不算）连续 ≥ 3 次；或这种调用的短序列（周期 2–3）连续重复 ≥ 3 次。每个连续段单独标记，`count` 为连续次数。
 - `user_interrupt`：用户中断（ESC、cancel、`control.interrupt`）。
 - `user_correction`：中断后紧接着用户发消息纠正，或用户消息以否定或纠正开头（启发式，标记 `confidence`）。
 
