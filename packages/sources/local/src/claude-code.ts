@@ -15,14 +15,27 @@
  * skipped silently; only a genuinely unknown type becomes `raw.unknown`.
  *
  * Turns: every external user message starts a new turn. A user message that
- * only carries `tool_result` blocks belongs to the running turn.
+ * only carries `tool_result` blocks belongs to the running turn. The
+ * `isCompactSummary` record is not a user turn: it belongs to the
+ * `segment.boundary` that follows a compaction.
+ *
+ * Model calls: Claude Code writes several `assistant` records for one API
+ * response (one per streamed content block). They share `message.id` and
+ * `requestId`, so they are collapsed into exactly one `llm.call`; the last
+ * record carries the final usage. The `<synthetic>` model is not a model call
+ * and is skipped for `llm.call`.
  */
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
-import type { AgentEvent, Normalizer, RawRecord } from "@openmatel/core";
+import {
+  contextTokens,
+  type AgentEvent,
+  type Normalizer,
+  type RawRecord,
+} from "@openmatel/core";
 
 import {
   EventScope,
@@ -46,6 +59,7 @@ import {
   timestampOf,
   truncateTitle,
   usageFrom,
+  type EventInit,
   type ParsedRecords,
   type ReadStats,
   type SessionFile,
@@ -125,6 +139,23 @@ export async function readRecordsWithStats(
 /* Normalization                                                               */
 /* -------------------------------------------------------------------------- */
 
+/** One model call that may still receive more assistant records. */
+interface PendingLlmCall {
+  event: AgentEvent;
+  /** Start of the API request, when an `api-request` record reported it. */
+  requestStart?: string;
+  /** End of the latest assistant record of the call. */
+  endTs?: string;
+  /** Boundaries opened by this call, whose after-size may still be updated. */
+  boundaries: PendingBoundary[];
+}
+
+/** A segment boundary whose `context_tokens_after` is still unknown. */
+interface PendingBoundary {
+  event: AgentEvent;
+  contextBefore: number | null;
+}
+
 /** State kept while walking the records of one session. */
 interface ClaudeState {
   factory: SourceEventFactory;
@@ -144,6 +175,33 @@ interface ClaudeState {
   sidechainUuids: Set<string>;
   /** Records by uuid, so a side chain can find the call that spawned it. */
   byUuid: Map<string, Record<string, unknown>>;
+  /** Current context segment; the first one is `seg_0`. */
+  segmentIndex: number;
+  segmentId: string;
+  /** Last context size reported by an `llm.call`, before the next boundary. */
+  lastContextTokens: number | null;
+  /** Boundaries waiting for the first call of their segment. */
+  pendingBoundaries: PendingBoundary[];
+  /** The latest compaction boundary, so its summary can be attached later. */
+  lastCompactionBoundary?: AgentEvent;
+  /** Model calls by `message.id` and `requestId`, for de-duplication. */
+  pendingLlmByMessage: Map<string, PendingLlmCall>;
+  pendingLlmByRequest: Map<string, PendingLlmCall>;
+  /** Start timestamps of `api-request` records, by request id. */
+  requestStarts: Map<string, string>;
+  /** Context window of a request, when the record reported one. */
+  requestContextWindows: Map<string, number>;
+  /** Latest `api-request` start, for files that omit `requestRef`. */
+  latestRequestStart?: string;
+  latestRequestContextWindow?: number;
+  /** Whether the latest `api-request` has already been matched to a call. */
+  latestRequestConsumed: boolean;
+  /** Session id of the previous record, to notice a resumed file. */
+  lastRecordSessionId?: string;
+  /** `leafUuid` of a `last-prompt` that points outside this file. */
+  resumeLeaf?: string;
+  /** Whether a real user/assistant/system record has been seen. */
+  sawConversation: boolean;
 }
 
 /** Create the state for one session file. */
@@ -157,7 +215,22 @@ function createState(file: SessionFile): ClaudeState {
     toolCalls: new ToolCallRegistry(),
     sidechainUuids: new Set(),
     byUuid: new Map(),
+    segmentIndex: 0,
+    segmentId: "seg_0",
+    lastContextTokens: null,
+    pendingBoundaries: [],
+    pendingLlmByMessage: new Map(),
+    pendingLlmByRequest: new Map(),
+    requestStarts: new Map(),
+    requestContextWindows: new Map(),
+    latestRequestConsumed: false,
+    sawConversation: false,
   };
+}
+
+/** Build an event in the segment the walker is currently in. */
+function createEvent(state: ClaudeState, init: EventInit): AgentEvent {
+  return state.factory.create({ ...init, segmentId: init.segmentId ?? state.segmentId });
 }
 
 /** The title of the session: an explicit title wins over the first prompt. */
@@ -170,6 +243,174 @@ function refreshTitle(state: ClaudeState): void {
   const title = sessionTitle(state);
   if (title === undefined || state.sessionStart === undefined) return;
   state.sessionStart.attrs.title = title;
+}
+
+/** Open the next context segment and emit its boundary node. */
+function openSegment(
+  state: ClaudeState,
+  reason: "compaction" | "resume" | "fork" | "unknown",
+  ts: string,
+  ref: string,
+  init: { contextBefore?: number | null; summary?: string; trigger?: string } = {},
+): AgentEvent {
+  const parent = state.segmentId;
+  state.segmentIndex += 1;
+  state.segmentId = `seg_${state.segmentIndex}`;
+
+  const contextBefore =
+    init.contextBefore !== undefined ? init.contextBefore : state.lastContextTokens;
+
+  const attrs: Record<string, unknown> = {
+    reason,
+    context_tokens_before: contextBefore,
+    context_tokens_after: null,
+    tokens_removed: null,
+    parent_segment_id: parent,
+    derived: false,
+  };
+  if (init.trigger !== undefined) attrs.trigger = init.trigger;
+
+  const content =
+    init.summary !== undefined
+      ? { output: { text: init.summary }, capture: "full" as const }
+      : undefined;
+  if (init.summary !== undefined) attrs.summary = init.summary;
+
+  const event = createEvent(state, {
+    line: state.scope.line,
+    sub: state.scope.next(),
+    kind: "segment.boundary",
+    ts,
+    attrs,
+    content,
+    ref,
+  });
+
+  state.events.push(event);
+  state.pendingBoundaries.push({ event, contextBefore });
+  if (reason === "compaction") state.lastCompactionBoundary = event;
+  return event;
+}
+
+/** Attach the compaction summary to the boundary that opened the segment. */
+function attachCompactionSummary(state: ClaudeState, summary: string, ts: string, ref: string): void {
+  const boundary =
+    state.lastCompactionBoundary ??
+    openSegment(state, "compaction", ts, ref, { contextBefore: state.lastContextTokens });
+  if (summary === "") return;
+  boundary.attrs.summary = summary;
+  boundary.content = { output: { text: summary }, capture: "full" };
+  state.lastCompactionBoundary = boundary;
+}
+
+/** Write a context size into the boundaries opened by the same call. */
+function applyBoundaryContext(boundaries: PendingBoundary[], context: number | null): void {
+  for (const pending of boundaries) {
+    const before = pending.contextBefore;
+    pending.event.attrs.context_tokens_after = context;
+    pending.event.attrs.tokens_removed =
+      before === null || context === null ? null : before - context;
+    if (context !== null) pending.event.attrs.derived = true;
+  }
+}
+
+/**
+ * Close the open boundaries at the first call of their segment.
+ *
+ * A call whose usage is not known yet keeps its boundary list, so a later
+ * record of the same call can still supply the context size. The next call
+ * does not, because the boundary is already closed.
+ */
+function completeBoundaries(state: ClaudeState, context: number | null): PendingBoundary[] {
+  const boundaries = state.pendingBoundaries;
+  state.pendingBoundaries = [];
+  applyBoundaryContext(boundaries, context);
+  return boundaries;
+}
+
+/**
+ * Open a `resume` / `fork` boundary when the records make one inferable.
+ *
+ * The format has no explicit resume marker. A new file that continues an old
+ * conversation shows up as a `last-prompt` whose `leafUuid` is not in the
+ * file, as the first record whose `parentUuid` is unknown, or as a `sessionId`
+ * change inside one file. None of these can be read from a single record, so
+ * they are detected while walking the whole file.
+ */
+function maybeOpenResumeBoundary(
+  state: ClaudeState,
+  data: Record<string, unknown>,
+  ts: string,
+  ref: string,
+  isSidechain: boolean,
+): void {
+  if (isSidechain) return;
+
+  const type = asString(data.type) ?? "";
+  const recordSessionId = asString(data.sessionId);
+  const previousSessionId = state.lastRecordSessionId;
+  const subtype = asString(data.subtype);
+
+  // These records open their own boundary; do not infer a second one here.
+  const isBoundaryRecord =
+    asBoolean(data.isCompactSummary) === true ||
+    (type === "system" &&
+      (subtype === "compact_boundary" ||
+        subtype === "compaction" ||
+        subtype === "resume" ||
+        subtype === "session_resume" ||
+        subtype === "resume_boundary" ||
+        subtype === "fork" ||
+        subtype === "session_fork" ||
+        subtype === "fork_boundary"));
+  if (isBoundaryRecord) {
+    if (recordSessionId !== undefined) state.lastRecordSessionId = recordSessionId;
+    return;
+  }
+
+  let reason: "resume" | "fork" | undefined;
+  if (
+    asBoolean(data.isFork) === true ||
+    asString(data.forkedFromSessionId) !== undefined ||
+    asString(data.forkedFrom) !== undefined
+  ) {
+    reason = "fork";
+  } else if (
+    asBoolean(data.isResume) === true ||
+    asString(data.resumedFromSessionId) !== undefined ||
+    asString(data.resumeFrom) !== undefined
+  ) {
+    reason = "resume";
+  } else if (
+    recordSessionId !== undefined &&
+    previousSessionId !== undefined &&
+    recordSessionId !== previousSessionId
+  ) {
+    reason = "resume";
+  } else if (
+    recordSessionId !== undefined &&
+    previousSessionId === undefined &&
+    recordSessionId !== state.factory.sourceSessionId &&
+    (type === "user" || type === "assistant" || type === "system")
+  ) {
+    // The first conversation record of a new file belongs to an older
+    // session: the file is a resumed continuation.
+    reason = "resume";
+  } else if (
+    !state.sawConversation &&
+    (type === "user" || type === "assistant" || type === "system")
+  ) {
+    const parentUuid = asString(data.parentUuid);
+    if (state.resumeLeaf !== undefined) reason = "resume";
+    else if (parentUuid !== undefined && !state.byUuid.has(parentUuid)) reason = "resume";
+  }
+
+  if (recordSessionId !== undefined) state.lastRecordSessionId = recordSessionId;
+  if (reason === undefined) return;
+
+  ensureSessionStart(state, data, ts, ref);
+  openSegment(state, reason, ts, ref);
+  state.resumeLeaf = undefined;
 }
 
 /** Make sure the session start event exists. */
@@ -190,7 +431,7 @@ function ensureSessionStart(
   if (cwd !== undefined) state.cwd = cwd;
   if (branch !== undefined) state.gitBranch = branch;
 
-  const event = state.factory.create({
+  const event = createEvent(state, {
     line: state.scope.line,
     sub: state.scope.next(),
     kind: "session.start",
@@ -223,7 +464,7 @@ function endTurn(state: ClaudeState, ts: string, stopReason: string, ref: string
   const attrs: Record<string, unknown> = { stop_reason: stopReason };
   if (state.model !== undefined) attrs.model = state.model;
   state.events.push(
-    state.factory.create({
+    createEvent(state, {
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "turn.end",
@@ -244,7 +485,7 @@ function startTurn(state: ClaudeState, ts: string, ref: string): void {
   state.turnId = state.factory.turnIdFor(state.turnIndex);
   state.turnOpen = true;
   state.events.push(
-    state.factory.create({
+    createEvent(state, {
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "turn.start",
@@ -266,6 +507,14 @@ function handleUser(
 ): void {
   const message = isPlainObject(record.message) ? record.message : undefined;
   const blocks = contentBlocks(message?.content);
+
+  // The synthetic summary that follows a compaction is not a user turn; it
+  // belongs to the boundary that has already opened the new segment.
+  if (asBoolean(record.isCompactSummary) === true) {
+    ensureSessionStart(state, record, ts, ref);
+    attachCompactionSummary(state, textFromContent(message?.content), ts, ref);
+    return;
+  }
 
   const toolResults = blocks.filter((block) => block.type === "tool_result");
   const contentBlocksOnly = blocks.filter((block) => block.type !== "tool_result");
@@ -303,7 +552,7 @@ function handleUser(
   refreshTitle(state);
 
   state.events.push(
-    state.factory.create({
+    createEvent(state, {
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "message.user",
@@ -316,6 +565,177 @@ function handleUser(
   );
 }
 
+/** Usage of one assistant record. A counter the source omitted stays null. */
+function assistantUsage(usageRecord: Record<string, unknown> | undefined) {
+  if (usageRecord === undefined) return emptyUsage("missing");
+  const details = isPlainObject(usageRecord.output_tokens_details)
+    ? usageRecord.output_tokens_details
+    : undefined;
+  return usageFrom({
+    input_tokens: asNumber(usageRecord.input_tokens) ?? null,
+    output_tokens: asNumber(usageRecord.output_tokens) ?? null,
+    cache_read_tokens: asNumber(usageRecord.cache_read_input_tokens) ?? null,
+    cache_write_tokens: asNumber(usageRecord.cache_creation_input_tokens) ?? null,
+    reasoning_tokens:
+      asNumber(details?.thinking_tokens) ?? asNumber(usageRecord.thinking_tokens) ?? null,
+  });
+}
+
+/** The pending model call of an assistant record, if it is a continuation. */
+function findPendingLlm(
+  state: ClaudeState,
+  messageId: string | undefined,
+  requestId: string | undefined,
+): PendingLlmCall | undefined {
+  if (messageId !== undefined) {
+    const byMessage = state.pendingLlmByMessage.get(messageId);
+    if (byMessage !== undefined) return byMessage;
+  }
+  if (requestId !== undefined) return state.pendingLlmByRequest.get(requestId);
+  return undefined;
+}
+
+/** Add a field to `attrs.derived` without duplicating it. */
+function markDerived(attrs: Record<string, unknown>, field: string): void {
+  const current = Array.isArray(attrs.derived)
+    ? attrs.derived.filter((value): value is string => typeof value === "string")
+    : [];
+  if (!current.includes(field)) attrs.derived = [...current, field];
+}
+
+/** Milliseconds between two timestamps, or `null` when either is invalid. */
+function elapsedMs(start: string, end: string): number | null {
+  const from = Date.parse(start);
+  const to = Date.parse(end);
+  if (Number.isNaN(from) || Number.isNaN(to)) return null;
+  return Math.max(0, to - from);
+}
+
+/** The context window reported by the record or its request, if any. */
+function contextWindowOf(
+  state: ClaudeState,
+  record: Record<string, unknown>,
+  usageRecord: Record<string, unknown> | undefined,
+  requestRef: string | undefined,
+): number | null {
+  return (
+    asNumber(usageRecord?.context_window) ??
+    asNumber(usageRecord?.contextWindow) ??
+    asNumber(record.context_window) ??
+    asNumber(record.contextWindow) ??
+    (requestRef !== undefined ? state.requestContextWindows.get(requestRef) : undefined) ??
+    state.latestRequestContextWindow ??
+    null
+  );
+}
+
+/** Create the one `llm.call` of a model response. */
+function startLlmCall(
+  state: ClaudeState,
+  record: Record<string, unknown>,
+  message: Record<string, unknown> | undefined,
+  model: string | undefined,
+  requestId: string | undefined,
+  ts: string,
+  ref: string,
+): PendingLlmCall {
+  const messageId = asString(message?.id);
+  const requestRef = asString(record.requestRef);
+  const fallbackStart = state.latestRequestConsumed ? undefined : state.latestRequestStart;
+  const requestStart =
+    (requestRef !== undefined ? state.requestStarts.get(requestRef) : undefined) ??
+    fallbackStart;
+  if (fallbackStart !== undefined) state.latestRequestConsumed = true;
+  const usageRecord = isPlainObject(message?.usage) ? message.usage : undefined;
+  const usage = assistantUsage(usageRecord);
+  const context = contextTokens(usage);
+  const contextWindow = contextWindowOf(state, record, usageRecord, requestRef);
+  const attrs = llmCallAttrs({
+    provider: "anthropic",
+    model,
+    contextTokens: context,
+    stopReason: asString(message?.stop_reason),
+    latencyMs: requestStart !== undefined ? elapsedMs(requestStart, ts) : null,
+    ttftMs: null,
+    requestId,
+    contextWindow,
+    derived: requestStart !== undefined ? ["latency_ms"] : [],
+  });
+  // The contract lists these fields even when the source did not report them.
+  attrs.request_id = requestId ?? null;
+  attrs.context_window = contextWindow;
+
+  const sub = state.scope.next();
+  const event = createEvent(state, {
+    line: state.scope.line,
+    sub,
+    kind: "llm.call",
+    ts: requestStart ?? ts,
+    endTs: ts,
+    turnId: state.turnId,
+    stepId: state.factory.stepIdFor(state.scope.line, sub),
+    attrs,
+    usage,
+    ref,
+  });
+
+  state.events.push(event);
+  const boundaries = completeBoundaries(state, context);
+  const pending: PendingLlmCall = { event, requestStart, endTs: ts, boundaries };
+  if (messageId !== undefined) state.pendingLlmByMessage.set(messageId, pending);
+  if (requestId !== undefined) state.pendingLlmByRequest.set(requestId, pending);
+  if (context !== null) state.lastContextTokens = context;
+  return pending;
+}
+
+/** Fold a later assistant record of the same response into its `llm.call`. */
+function updateLlmCall(
+  state: ClaudeState,
+  pending: PendingLlmCall,
+  record: Record<string, unknown>,
+  message: Record<string, unknown> | undefined,
+  model: string | undefined,
+  requestId: string | undefined,
+  ts: string,
+): void {
+  const messageId = asString(message?.id);
+  const usageRecord = isPlainObject(message?.usage) ? message.usage : undefined;
+  if (usageRecord !== undefined) pending.event.usage = assistantUsage(usageRecord);
+
+  const usage = pending.event.usage ?? emptyUsage("missing");
+  const context = contextTokens(usage);
+  const attrs = pending.event.attrs;
+  attrs.context_tokens = context;
+
+  if (model !== undefined) attrs.model = model;
+  if (requestId !== undefined) attrs.request_id = requestId;
+  if (message !== undefined && Object.prototype.hasOwnProperty.call(message, "stop_reason")) {
+    attrs.stop_reason = asString(message.stop_reason) ?? null;
+  }
+
+  const requestRef = asString(record.requestRef);
+  const contextWindow = contextWindowOf(state, record, usageRecord, requestRef);
+  if (contextWindow !== null || attrs.context_window === undefined) {
+    attrs.context_window = contextWindow;
+  }
+
+  if (pending.requestStart !== undefined) {
+    const latency = elapsedMs(pending.requestStart, ts);
+    attrs.latency_ms = latency;
+    if (latency !== null) markDerived(attrs, "latency_ms");
+  }
+
+  pending.endTs = ts;
+  pending.event.end_ts = ts;
+  if (messageId !== undefined) state.pendingLlmByMessage.set(messageId, pending);
+  if (requestId !== undefined) state.pendingLlmByRequest.set(requestId, pending);
+
+  if (context !== null) {
+    state.lastContextTokens = context;
+    applyBoundaryContext(pending.boundaries, context);
+  }
+}
+
 /** Handle one `assistant` record. */
 function handleAssistant(
   state: ClaudeState,
@@ -326,7 +746,9 @@ function handleAssistant(
   const message = isPlainObject(record.message) ? record.message : undefined;
   const blocks = contentBlocks(message?.content);
 
-  const model = realModel(asString(message?.model));
+  const rawModel = asString(message?.model);
+  const synthetic = rawModel !== undefined && rawModel.trim().toLowerCase() === SYNTHETIC_MODEL;
+  const model = realModel(rawModel);
   if (model !== undefined) {
     state.model = model;
     if (state.sessionStart) state.sessionStart.attrs.model = model;
@@ -334,34 +756,18 @@ function handleAssistant(
 
   ensureSessionStart(state, record, ts, ref);
 
-  // The model call itself.
-  const usageRecord = isPlainObject(message?.usage) ? message.usage : undefined;
-  const details = isPlainObject(usageRecord?.output_tokens_details)
-    ? usageRecord?.output_tokens_details
-    : undefined;
-  const requestId = asString(record.requestId);
-  const llmAttrs = llmCallAttrs({ provider: "anthropic", model, requestId });
-
-  state.events.push(
-    state.factory.create({
-      line: state.scope.line,
-      sub: state.scope.next(),
-      kind: "llm.call",
-      ts,
-      turnId: state.turnId,
-      attrs: llmAttrs,
-      usage: usageRecord
-        ? usageFrom({
-            input_tokens: asNumber(usageRecord.input_tokens) ?? null,
-            output_tokens: asNumber(usageRecord.output_tokens) ?? null,
-            cache_read_tokens: asNumber(usageRecord.cache_read_input_tokens) ?? null,
-            cache_write_tokens: asNumber(usageRecord.cache_creation_input_tokens) ?? null,
-            reasoning_tokens: asNumber(details?.thinking_tokens) ?? null,
-          })
-        : emptyUsage("missing"),
-      ref,
-    }),
-  );
+  // The model call itself. Several assistant records belong to one response;
+  // the `<synthetic>` sentinel is not a model call at all.
+  if (!synthetic) {
+    const messageId = asString(message?.id);
+    const requestId = asString(record.requestId);
+    let pending = findPendingLlm(state, messageId, requestId);
+    if (pending === undefined) {
+      pending = startLlmCall(state, record, message, model, requestId, ts, ref);
+    } else {
+      updateLlmCall(state, pending, record, message, model, requestId, ts);
+    }
+  }
 
   // Reasoning.
   const thinking = blocks
@@ -370,7 +776,7 @@ function handleAssistant(
     .filter((text) => text !== "");
   if (thinking.length > 0) {
     state.events.push(
-      state.factory.create({
+      createEvent(state, {
         line: state.scope.line,
         sub: state.scope.next(),
         kind: "reasoning",
@@ -390,7 +796,7 @@ function handleAssistant(
     .filter((text) => text !== "");
   if (texts.length > 0) {
     state.events.push(
-      state.factory.create({
+      createEvent(state, {
         line: state.scope.line,
         sub: state.scope.next(),
         kind: "message.agent",
@@ -431,7 +837,7 @@ function handleAssistant(
       const entries = planEntriesFrom(input);
       if (entries.length > 0) {
         state.events.push(
-          state.factory.create({
+          createEvent(state, {
             line: state.scope.line,
             sub: state.scope.next(),
             kind: "plan.update",
@@ -458,7 +864,7 @@ function handleSystem(state: ClaudeState, record: Record<string, unknown>, ts: s
     const maxRetries = asNumber(record.maxRetries);
     if (maxRetries !== undefined) attrs.max_retries = maxRetries;
     state.events.push(
-      state.factory.create({
+      createEvent(state, {
         line: state.scope.line,
         sub: state.scope.next(),
         kind: "control.retry",
@@ -473,17 +879,31 @@ function handleSystem(state: ClaudeState, record: Record<string, unknown>, ts: s
     return;
   }
   if (subtype === "compact_boundary" || subtype === "compaction") {
-    state.events.push(
-      state.factory.create({
-        line: state.scope.line,
-        sub: state.scope.next(),
-        kind: "control.compaction",
-        ts,
-        turnId: state.turnId,
-        attrs: {},
-        ref,
-      }),
-    );
+    const metadata = isPlainObject(record.compactMetadata) ? record.compactMetadata : undefined;
+    const preTokens =
+      asNumber(metadata?.preTokens) ??
+      asNumber(metadata?.pre_tokens) ??
+      asNumber(record.preTokens);
+    const summary =
+      asString(metadata?.summary) ??
+      asString(record.summary) ??
+      (typeof record.content === "string" ? record.content : undefined);
+    ensureSessionStart(state, record, ts, ref);
+    openSegment(state, "compaction", ts, ref, {
+      contextBefore: state.lastContextTokens ?? preTokens ?? null,
+      summary,
+      trigger: asString(metadata?.trigger),
+    });
+    return;
+  }
+  if (subtype === "resume" || subtype === "session_resume" || subtype === "resume_boundary") {
+    ensureSessionStart(state, record, ts, ref);
+    openSegment(state, "resume", ts, ref);
+    return;
+  }
+  if (subtype === "fork" || subtype === "session_fork" || subtype === "fork_boundary") {
+    ensureSessionStart(state, record, ts, ref);
+    openSegment(state, "fork", ts, ref);
   }
 }
 
@@ -519,7 +939,7 @@ function handleSidechain(state: ClaudeState, record: Record<string, unknown>, ts
   if (spawn?.task !== undefined) attrs.task = spawn.task;
 
   state.events.push(
-    state.factory.create({
+    createEvent(state, {
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "subagent.spawn",
@@ -564,8 +984,11 @@ function handleRecord(state: ClaudeState, record: RawRecord): void {
     timestampOf(data.timestamp, data.createdAt) ?? new Date(0).toISOString();
 
   const isSidechain = asBoolean(data.isSidechain) === true;
+  maybeOpenResumeBoundary(state, data, ts, ref, isSidechain);
   if (isSidechain) {
     handleSidechain(state, data, ts, ref);
+  } else if (type === "user" || type === "assistant" || type === "system") {
+    state.sawConversation = true;
   }
 
   switch (type) {
@@ -594,19 +1017,43 @@ function handleRecord(state: ClaudeState, record: RawRecord): void {
       }
       break;
     }
+    case "api-request": {
+      const requestId = asString(data.id);
+      const start = timestampOf(data.timestamp, data.createdAt);
+      if (requestId !== undefined && start !== undefined) {
+        state.requestStarts.set(requestId, start);
+        state.latestRequestStart = start;
+        state.latestRequestConsumed = false;
+      }
+      const params = isPlainObject(data.params) ? data.params : undefined;
+      const contextWindow =
+        asNumber(params?.context_window) ?? asNumber(params?.contextWindow);
+      if (requestId !== undefined && contextWindow !== undefined) {
+        state.requestContextWindows.set(requestId, contextWindow);
+      }
+      if (contextWindow !== undefined) state.latestRequestContextWindow = contextWindow;
+      break;
+    }
+    case "last-prompt": {
+      const leafUuid = asString(data.leafUuid);
+      if (leafUuid !== undefined && !state.byUuid.has(leafUuid)) {
+        state.resumeLeaf = leafUuid;
+      } else if (leafUuid !== undefined) {
+        state.resumeLeaf = undefined;
+      }
+      break;
+    }
     case "attachment":
     case "queue-operation":
-    case "api-request":
     case "api-request-blob":
     case "api-request-shape":
-    case "last-prompt":
     case "atis-latch":
     case "cost-state":
       break;
     default: {
       if (type !== "" && !KNOWN_TYPES.has(type)) {
         state.events.push(
-          state.factory.create({
+          createEvent(state, {
             line,
             sub: state.scope.next(),
             kind: "raw.unknown",
@@ -651,7 +1098,7 @@ function finalize(state: ClaudeState, file: SessionFile, endLine: number): void 
   if (title !== undefined) attrs.title = title;
 
   state.events.push(
-    state.factory.create({
+    createEvent(state, {
       line: endLine,
       sub: state.scope.next(),
       kind: "session.end",
