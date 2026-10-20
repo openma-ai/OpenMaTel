@@ -421,6 +421,25 @@ const turnRows = (
   });
 
 /**
+ * Keep only the turn rows selected by the overview brush.
+ *
+ * A group with no matching turn is dropped entirely so the ledger mirrors the
+ * selection instead of showing empty segment shells. Segment headers of the
+ * groups that *do* contain a match stay intact.
+ */
+export function filterTurnGroups(
+  groups: readonly SegmentGroup[],
+  turnIds: ReadonlySet<string>,
+): SegmentGroup[] {
+  return groups
+    .map((group) => ({
+      ...group,
+      turns: group.turns.filter((row) => turnIds.has(row.turn.turn_id)),
+    }))
+    .filter((group) => group.turns.length > 0);
+}
+
+/**
  * Segment chrome is useful only when there is more than one context segment,
  * or when the only segment is a non-`seg_0` branch opened by a boundary.
  * A normal single-segment session therefore reads as one flat turn list.
