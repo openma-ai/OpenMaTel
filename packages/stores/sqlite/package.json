@@ -1,0 +1,31 @@
+{
+  "name": "@openmatel/store-sqlite",
+  "version": "0.1.0",
+  "description": "SQLite store (Sink + Query) for OpenMaTel, built on the node:sqlite module of Node.js — zero native dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@openmatel/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@openmatel/contract-tests": "workspace:*",
+    "vitest": "^3"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
