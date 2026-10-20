@@ -29,6 +29,16 @@ importers:
 
   packages/core: {}
 
+  packages/sources/local:
+    dependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@openmatel/contract-tests':
+        specifier: workspace:*
+        version: link:../../contract-tests
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':

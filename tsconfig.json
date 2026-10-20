@@ -5,6 +5,8 @@
     { "path": "./packages/core" },
     { "path": "./packages/core/tsconfig.test.json" },
     { "path": "./packages/contract-tests" },
-    { "path": "./packages/contract-tests/tsconfig.test.json" }
+    { "path": "./packages/contract-tests/tsconfig.test.json" },
+    { "path": "./packages/sources/local" },
+    { "path": "./packages/sources/local/tsconfig.test.json" }
   ]
 }
