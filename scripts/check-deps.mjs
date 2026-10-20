@@ -104,7 +104,10 @@ function collectDependencies(manifest) {
 const isWorkspaceDependency = (dep, workspaceNames) =>
   workspaceNames.has(dep.name) || LOCAL_PROTOCOL_PREFIXES.some((prefix) => dep.spec.startsWith(prefix));
 
-const isOpenmaInternal = (name) => name.includes("openma") && !name.startsWith(OPENMATEL_SCOPE);
+// The published CLI is literally named "openmatel"; that is the product, not
+// an OpenMA internal. Everything else containing "openma" must stay out.
+const isOpenmaInternal = (name) =>
+  name.includes("openma") && name !== "openmatel" && !name.startsWith(OPENMATEL_SCOPE);
 
 function main() {
   const problems = [];

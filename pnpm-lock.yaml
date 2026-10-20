@@ -18,6 +18,24 @@ importers:
         specifier: ^3.2
         version: 3.2.7(@types/node@24.19.2)
 
+  packages/cli:
+    devDependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../core
+      '@openmatel/source-local':
+        specifier: workspace:*
+        version: link:../sources/local
+      '@openmatel/store-sqlite':
+        specifier: workspace:*
+        version: link:../stores/sqlite
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      vitest:
+        specifier: ^3
+        version: 3.2.7(@types/node@24.19.2)
+
   packages/contract-tests:
     dependencies:
       '@openmatel/core':
