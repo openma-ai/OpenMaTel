@@ -45,6 +45,7 @@ Add your adapter to the contract-test matrix in the same PR. A contract test tha
 - **`packages/core` has zero dependencies.** No runtime dependencies at all, and no dependency on any workspace package. Core holds the domain model and the ports; everything else depends on it, never the other way around.
 - **No OpenMA internals.** No package may depend on a package whose name contains `openma` outside the `@openmatel/*` scope. OpenMaTel is a standalone product and must work without any OpenMA component.
 - **The UI never touches a store.** `packages/ui` must not depend on any `@openmatel/store-*` package — it talks to the server over the HTTP Query API only.
+- **The server never touches a store.** `packages/server` must not depend on any `@openmatel/store-*` package — the composition root passes a `Query` port into `createApp`.
 
 ## Commit messages and style
 

@@ -47,6 +47,22 @@ importers:
 
   packages/core: {}
 
+  packages/server:
+    dependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../core
+      hono:
+        specifier: ^4.13.13
+        version: 4.13.13
+    devDependencies:
+      '@openmatel/contract-tests':
+        specifier: workspace:*
+        version: link:../contract-tests
+      vitest:
+        specifier: ^3
+        version: 3.2.7(@types/node@24.19.2)
+
   packages/sources/local:
     dependencies:
       '@openmatel/core':
@@ -460,6 +476,10 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  hono@4.13.13:
+    resolution: {integrity: sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA==}
+    engines: {node: '>=16.9.0'}
 
   js-tokens@9.0.1:
     resolution: {integrity: sha512-mxa9E9ITFOt0ban3j6L5MpjwegGz6lBQmM1IJkWeBZGcMxto50+eWdjC/52xDbS2vy0k7vIMK0Fe2wfL9OQSpQ==}
@@ -903,6 +923,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  hono@4.13.13: {}
 
   js-tokens@9.0.1: {}
 

@@ -10,9 +10,10 @@
  *   (b) No package may depend on a package whose name contains "openma" other
  *       than in the @openmatel/* scope. OpenMA internals are not part of this
  *       product: OpenMaTel has to work standalone.
- *   (c) packages/ui must not depend on any @openmatel/store-* package. The UI
- *       talks to the server through the HTTP Query API only, it never touches
- *       a store directly.
+ *   (c) packages/ui and packages/server must not depend on any
+ *       @openmatel/store-* package. The UI talks to the server through the
+ *       HTTP Query API only, and the server gets a Query port injected; neither
+ *       of them may touch a store directly.
  *
  * Exits 0 and prints "deps ok" when everything holds, exits 1 with a report
  * otherwise. Passes when the repository contains no packages at all.
@@ -142,6 +143,7 @@ function main() {
   for (const pkg of packages) {
     const isCore = pkg.dir === "packages/core" || pkg.name === "@openmatel/core";
     const isUi = pkg.dir === "packages/ui" || pkg.name === "@openmatel/ui";
+    const isServer = pkg.dir === "packages/server" || pkg.name === "@openmatel/server";
     const deps = collectDependencies(pkg.manifest);
 
     // (b) A workspace package must not be an OpenMA internal either.
@@ -161,11 +163,12 @@ function main() {
         );
       }
 
-      // (c) The UI only speaks the HTTP Query API, it must not embed a store.
-      if (isUi && dep.name.startsWith(OPENMATEL_STORE_SCOPE)) {
+      // (c) Neither the UI nor the server may embed a store. The UI only
+      // speaks the HTTP Query API; the server receives a Query port.
+      if ((isUi || isServer) && dep.name.startsWith(OPENMATEL_STORE_SCOPE)) {
         problems.push(
           `${pkg.dir}: must not depend on "${dep.name}" (${dep.field}) — ` +
-            `the UI accesses data through the HTTP Query API only`,
+            `${isUi ? "the UI accesses data through the HTTP Query API only" : "the server depends on the Query port, not on a store"}`,
         );
       }
     }
