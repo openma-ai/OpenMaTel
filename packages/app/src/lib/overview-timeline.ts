@@ -35,6 +35,12 @@ export interface OverviewRange {
   end: number;
 }
 
+/** A wall-clock range in epoch milliseconds. */
+export interface OverviewTimeRange {
+  start: number;
+  end: number;
+}
+
 /** The three swim lanes. */
 export type OverviewLane = "input" | "model" | "tools";
 
@@ -52,6 +58,10 @@ export interface OverviewSpan {
   start: number;
   /** End in the active projection's domain; equal to `start` for markers. */
   end: number;
+  /** Absolute start timestamp in epoch milliseconds. */
+  absolute_start: number;
+  /** Absolute end timestamp in epoch milliseconds, or `null` if unknown. */
+  absolute_end: number | null;
   /** `true` when the end was never recorded; render a start marker only. */
   running: boolean;
   /** Recorded duration in milliseconds, or `null` when unknown/running. */
@@ -114,6 +124,8 @@ export interface OverviewWatermark {
 export interface OverviewModel {
   mode: OverviewMode;
   domain: OverviewRange & { duration: number };
+  /** Absolute wall-clock bounds behind the projection, in epoch milliseconds. */
+  time_domain: OverviewTimeRange;
   lanes: Record<OverviewLane, OverviewSpan[]>;
   spans: OverviewSpan[];
   watermark: OverviewWatermark;
@@ -578,6 +590,8 @@ export function buildOverviewModel(input: OverviewInput): OverviewModel {
       segment_id: span.segment_id,
       start: range.start,
       end: range.end,
+      absolute_start: span.absolute_start,
+      absolute_end: span.absolute_end,
       running: span.running,
       duration_ms: span.duration_ms,
       is_error: span.is_error,
@@ -639,6 +653,7 @@ export function buildOverviewModel(input: OverviewInput): OverviewModel {
   return {
     mode: input.mode,
     domain: { start: 0, end: domainDuration, duration: domainDuration },
+    time_domain: { start: rawStart, end: rawEnd },
     lanes,
     spans: projectedSpans,
     watermark: {
@@ -673,6 +688,65 @@ export function turnIdsForRange(
     if (span.start <= end && span.end >= start) turnIds.add(span.turn_id);
   }
   return turnIds;
+}
+
+/** Map a projected coordinate back to an epoch timestamp. */
+function unprojectValue(model: OverviewModel, value: number): number {
+  const clamped = clamp(value, model.domain.start, model.domain.end);
+  if (model.mode === "actual") return model.time_domain.start + clamped;
+  if (model.mode === "sequence") return clamped;
+
+  let cursor = model.time_domain.start;
+  let projected = 0;
+  for (const gap of model.breaks) {
+    const gapStart = timeOf(gap.real_start) ?? cursor;
+    const gapEnd = timeOf(gap.real_end) ?? gapStart;
+    if (clamped <= gap.start) return cursor + Math.max(0, clamped - projected);
+    const width = Math.max(0, gap.end - gap.start);
+    if (clamped <= gap.end) {
+      const ratio = width === 0 ? 0 : (clamped - gap.start) / width;
+      return gapStart + ratio * Math.max(0, gapEnd - gapStart);
+    }
+    projected = gap.end;
+    cursor = gapEnd;
+  }
+  return cursor + Math.max(0, clamped - projected);
+}
+
+/**
+ * Map a brush range in the active projection to an absolute wall-clock range.
+ *
+ * Sequence mode has no continuous time axis, so the range is expressed by the
+ * first and last spans it touches. Actual and compressed modes invert their
+ * projection, which also maps a brush inside a collapsed idle gap back to its
+ * real timestamps.
+ */
+export function timeRangeForRange(
+  model: OverviewModel,
+  range: OverviewRange,
+): OverviewTimeRange | null {
+  if (!model.has_data) return null;
+  const start = Math.min(range.start, range.end);
+  const end = Math.max(range.start, range.end);
+  if (end < model.domain.start || start > model.domain.end) return null;
+
+  if (model.mode === "sequence") {
+    let first: number | null = null;
+    let last: number | null = null;
+    for (const span of model.spans) {
+      if (span.start > end || span.end < start) continue;
+      const spanStart = span.absolute_start;
+      const spanEnd = span.absolute_end ?? span.absolute_start;
+      if (first === null || spanStart < first) first = spanStart;
+      if (last === null || spanEnd > last) last = spanEnd;
+    }
+    if (first === null || last === null) return null;
+    return { start: first, end: Math.max(first, last) };
+  }
+
+  const left = unprojectValue(model, start);
+  const right = unprojectValue(model, end);
+  return { start: Math.min(left, right), end: Math.max(left, right) };
 }
 
 /** Normalise a drag into an ordered, non-empty range in the model domain. */

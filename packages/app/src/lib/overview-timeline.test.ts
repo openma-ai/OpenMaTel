@@ -16,6 +16,7 @@ import {
   normalizeOverviewRange,
   overviewFraction,
   overviewSpanTooltip,
+  timeRangeForRange,
   turnIdsForRange,
   type OverviewInput,
 } from "./overview-timeline";
@@ -217,6 +218,49 @@ describe("overview projection", () => {
       running: false,
     });
     expect(model.domain.duration).toBe(8_000);
+  });
+
+  it("maps a brushed range to an absolute time range", () => {
+    const actual = modelFor(input("actual"));
+    expect(
+      timeRangeForRange(actual, { start: 1_000, end: 3_000 }),
+    ).toEqual({
+      start: Date.parse("2026-10-20T10:00:01.000Z"),
+      end: Date.parse("2026-10-20T10:00:03.000Z"),
+    });
+
+    const sequence = buildOverviewModel(input("sequence"));
+    expect(
+      timeRangeForRange(sequence, { start: 0.5, end: 1.5 }),
+    ).toEqual({
+      start: Date.parse("2026-10-20T10:00:00.000Z"),
+      end: Date.parse("2026-10-20T10:00:02.000Z"),
+    });
+    expect(timeRangeForRange(sequence, { start: 10, end: 20 })).toBeNull();
+  });
+
+  it("maps a brush inside a compressed idle break back to real time", () => {
+    const turns = [
+      turn("turn_1", [
+        event("a1", "message.user", "2026-10-20T10:00:00.000Z"),
+        event("a2", "tool.call", "2026-10-20T10:00:00.000Z", {
+          end_ts: "2026-10-20T10:00:01.000Z",
+          attrs: { tool_name: "read" },
+        }),
+      ]),
+      turn("turn_2", [
+        event("b1", "message.user", "2026-10-20T12:00:00.000Z"),
+      ]),
+    ];
+    const compressed = modelFor({ mode: "compressed", turns, calls: [] });
+    const gap = compressed.breaks[0]!;
+
+    expect(
+      timeRangeForRange(compressed, { start: gap.start, end: gap.end }),
+    ).toEqual({
+      start: Date.parse("2026-10-20T10:00:01.000Z"),
+      end: Date.parse("2026-10-20T12:00:00.000Z"),
+    });
   });
 
   it("collapses idle gaps to a fixed-width break in compressed mode", () => {

@@ -19,6 +19,7 @@
 
 import type {
   AgentEvent,
+  EventKind,
   IdleGap,
   LlmCallPoint,
   LlmCallRetry,
@@ -40,6 +41,10 @@ import {
   parseSegmentBoundary,
   type TurnRow,
 } from "./session-view";
+
+// The brush time range is defined by the overview projection; re-export the
+// mapper here so callers that only work with the ledger can use it too.
+export { timeRangeForRange, type OverviewTimeRange } from "./overview-timeline";
 
 /** Maximum length of a ledger summary, in characters. */
 export const SUMMARY_LIMIT = 240;
@@ -90,12 +95,23 @@ export interface BuildLedgerInput {
   calls: readonly LlmCallPoint[];
 }
 
+/** A wall-clock range in epoch milliseconds or ISO strings. */
+export interface LedgerTimeRange {
+  start: number | string;
+  end: number | string;
+}
+
 /** Options of {@link filterLedger}. */
 export interface FilterLedgerOptions {
   /** Case-insensitive search over `summary` and `kind`. */
   query?: string;
   /** Brushed turn ids; rows outside the selection are dimmed, not removed. */
   turnIds?: ReadonlySet<string> | null;
+  /**
+   * Brushed wall-clock range. Rows whose time does not overlap it are dimmed,
+   * not removed. Values may be epoch milliseconds or ISO strings.
+   */
+  timeRange?: LedgerTimeRange | null;
   /** Turns whose rows collapse to their `turn_header`. */
   collapsedTurns?: ReadonlySet<string>;
   /** Hide `tool`/`subtool` rows but keep request separators with a count. */
@@ -109,7 +125,7 @@ export interface FilterLedgerResult {
   rows: LedgerRow[];
   /** Ids of rows whose summary or kind matched the query. */
   matches: Set<string>;
-  /** Ids of rows outside the brushed turn selection. */
+  /** Ids of rows dimmed by the active turn or time selection. */
   dimmed: Set<string>;
 }
 
@@ -179,6 +195,81 @@ const asIso = (value: string | null | undefined): string | null =>
 
 const isoAt = (value: number): string | null =>
   Number.isFinite(value) ? new Date(value).toISOString() : null;
+
+/** Parse either an epoch-millisecond number or an ISO timestamp. */
+const instantOf = (value: number | string | null | undefined): number | null => {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+interface ResolvedTimeRange {
+  start: number;
+  end: number;
+}
+
+function resolveTimeRange(
+  range: LedgerTimeRange | null | undefined,
+): ResolvedTimeRange | null {
+  if (range === null || range === undefined) return null;
+  const start = instantOf(range.start);
+  const end = instantOf(range.end);
+  if (start === null || end === null) return null;
+  return { start: Math.min(start, end), end: Math.max(start, end) };
+}
+
+interface RowInterval {
+  start: number;
+  end: number;
+}
+
+/**
+ * Effective wall-clock interval of every row.
+ *
+ * A row with no timestamp inherits the start of the nearest previous row that
+ * has one, so old or synthetic events still sort into the brushed window.
+ */
+function rowIntervals(rows: readonly LedgerRow[]): Map<string, RowInterval> {
+  const intervals = new Map<string, RowInterval>();
+  let previous: number | null = null;
+  for (const row of rows) {
+    const start: number | null =
+      instantOf(row.start) ?? instantOf(row.end) ?? previous;
+    const end: number | null = instantOf(row.end) ?? start;
+    if (start !== null) previous = start;
+    if (start !== null && end !== null) {
+      intervals.set(row.id, { start, end });
+    }
+  }
+  return intervals;
+}
+
+const intervalsOverlap = (left: RowInterval, right: ResolvedTimeRange): boolean =>
+  left.start <= right.end && left.end >= right.start;
+
+function rowOverlapsRange(
+  row: LedgerRow,
+  intervals: ReadonlyMap<string, RowInterval>,
+  range: ResolvedTimeRange,
+): boolean {
+  const interval = intervals.get(row.id);
+  return interval !== undefined && intervalsOverlap(interval, range);
+}
+
+/**
+ * Index of the first row whose effective time overlaps `range`, or `-1` when
+ * no row does. Used to scroll the ledger to the start of a brushed window.
+ */
+export function firstRowIndexInTimeRange(
+  rows: readonly LedgerRow[],
+  range: LedgerTimeRange | null | undefined,
+): number {
+  const resolved = resolveTimeRange(range);
+  if (resolved === null) return -1;
+  const intervals = rowIntervals(rows);
+  return rows.findIndex((row) => rowOverlapsRange(row, intervals, resolved));
+}
 
 /** Collapse whitespace and cap a summary at {@link SUMMARY_LIMIT}. */
 function oneLine(text: string, max = SUMMARY_LIMIT): string {
@@ -626,13 +717,14 @@ function idleRow(
   segmentId: string,
   turnId: string | null,
   requestIndex: number | null = null,
+  step: number | null = null,
 ): LedgerRow {
   return {
     id: `idle:${gap.after_event_id}:${gap.before_event_id}`,
     kind: "idle_gap",
     turn_id: turnId,
     segment_id: segmentId,
-    step: null,
+    step,
     request_index: requestIndex,
     start: asIso(gap.start),
     end: asIso(gap.end),
@@ -647,6 +739,43 @@ type Seed =
   | { type: "event"; at: number; order: number; event: AgentEvent }
   | { type: "request"; at: number; order: number; info: RequestInfo }
   | { type: "gap"; at: number; order: number; gap: IdleGap };
+
+/**
+ * Where a step first appears in the ledger. Step numbers live in the row
+ * gutter now, so a marker is only materialised as a standalone row when the
+ * step produced no other rows at all, is not a model call and has a kind that
+ * can stand on its own.
+ */
+interface StepAnchor {
+  index: number;
+  ordinal: number;
+  stepId: string;
+  kind: EventKind;
+  requestIndex: number | null;
+  seed: Seed;
+  event: AgentEvent | null;
+}
+
+/**
+ * Kinds that may get a standalone step row when the step produced nothing
+ * else.
+ *
+ * This is deliberately an allow-list: model calls have their request
+ * separator, while env/environment, context, reasoning, memory, skill and
+ * lifecycle/control events only describe the envelope around a step. A
+ * permission or approval is the exception — it is meaningful on its own even
+ * when no other row was recorded.
+ */
+const STANDALONE_STEP_KINDS: ReadonlySet<EventKind> = new Set<EventKind>([
+  "permission.request",
+  "permission.decision",
+]);
+
+const isStandaloneStepKind = (kind: EventKind): boolean =>
+  STANDALONE_STEP_KINDS.has(kind);
+
+/** The coarse, human-readable kind shown by a standalone step row. */
+const stepKindLabel = (kind: EventKind): string => kind.split(".")[0] ?? kind;
 
 const seedPriority = (seed: Seed): number => {
   switch (seed.type) {
@@ -740,11 +869,32 @@ function turnRowsFor(
       }
       if (info.request_index !== null) {
         seeds.push({ type: "request", at: timeOf(info.start) ?? Number.MAX_SAFE_INTEGER, order: order++, info });
+      } else if (asString(event.step_id) !== null) {
+        // A call without a request index has no separator row; keep a seed so
+        // its step can still appear (standalone when it has no peers).
+        seeds.push({
+          type: "event",
+          at: timeOf(event.ts) ?? Number.MAX_SAFE_INTEGER,
+          order: order++,
+          event,
+        });
       }
       continue;
     }
 
-    if (eventDraft(event) === null) continue;
+    if (eventDraft(event) === null) {
+      // Unprojected lifecycle events still identify their step. They only
+      // materialise a row when the step produced nothing else.
+      if (asString(event.step_id) !== null) {
+        seeds.push({
+          type: "event",
+          at: timeOf(event.ts) ?? Number.MAX_SAFE_INTEGER,
+          order: order++,
+          event,
+        });
+      }
+      continue;
+    }
     seeds.push({
       type: "event",
       at: timeOf(event.ts) ?? Number.MAX_SAFE_INTEGER,
@@ -778,7 +928,18 @@ function turnRowsFor(
 
   sortSeeds(seeds);
 
+  // A step is covered by a request separator when the separator belongs to
+  // the same step. Such a step must not get a second, standalone "Step N"
+  // row; lifecycle events with a request index are already excluded by the
+  // standalone-kind allow-list.
+  const requestStepIds = new Set<string>();
+  for (const seed of seeds) {
+    if (seed.type !== "request") continue;
+    if (seed.info.step_id !== null) requestStepIds.add(seed.info.step_id);
+  }
+
   const rows: LedgerRow[] = [];
+  const stepAnchors: StepAnchor[] = [];
   const stepOrdinals = new Map<string, number>();
   let nextStep = 1;
   let currentStepId: string | null = null;
@@ -791,47 +952,77 @@ function turnRowsFor(
     return null;
   };
 
-  const pushStep = (stepId: string, requestIndex: number | null, seed: Seed): void => {
+  const ensureStep = (stepId: string): number => {
     let ordinal = stepOrdinals.get(stepId);
     if (ordinal === undefined) {
       ordinal = nextStep;
       nextStep += 1;
       stepOrdinals.set(stepId, ordinal);
     }
-    currentStep = ordinal;
-    const eventId = seed.type === "event" ? seed.event.event_id : seed.type === "request" ? seed.info.event_id : null;
+    return ordinal;
+  };
+
+  const stepRow = (anchor: StepAnchor): LedgerRow => {
+    const { seed } = anchor;
+    const eventId =
+      seed.type === "event"
+        ? seed.event.event_id
+        : seed.type === "request"
+          ? seed.info.event_id
+          : null;
     const seedKey =
       seed.type === "request"
         ? `request-${seed.info.request_index ?? "unknown"}`
         : seed.type === "event"
           ? `event-${eventId ?? "unknown"}`
           : "gap";
-    rows.push({
-      id: `step:${turn.turn_id}:${stepId}:${seedKey}`,
+    return {
+      id: `step:${turn.turn_id}:${anchor.stepId}:${seedKey}`,
       kind: "step",
       turn_id: turn.turn_id,
       segment_id: turn.segment_id,
-      step: ordinal,
-      request_index: requestIndex,
+      step: anchor.ordinal,
+      request_index: anchor.requestIndex,
       start: isoAt(seed.at),
       end: null,
       event_ids: eventId === null ? [] : [eventId],
-      summary: `Step ${ordinal}`,
+      summary: joinParts([`Step ${anchor.ordinal}`, stepKindLabel(anchor.kind)]),
       error: false,
       status: "ok",
-    });
+    };
   };
+
+  const isRequestCovered = (anchor: StepAnchor): boolean =>
+    anchor.stepId !== null && requestStepIds.has(anchor.stepId);
 
   for (const seed of seeds) {
     if (seed.type === "gap") {
-      rows.push(idleRow(seed.gap, turn.segment_id, turn.turn_id, currentRequest));
+      rows.push(
+        idleRow(
+          seed.gap,
+          turn.segment_id,
+          turn.turn_id,
+          currentRequest,
+          currentStep,
+        ),
+      );
       continue;
     }
 
     const stepId = stepIdOf(seed);
     if (stepId !== null && stepId !== currentStepId) {
       currentStepId = stepId;
-      pushStep(stepId, seed.type === "request" ? seed.info.request_index : currentRequest, seed);
+      currentStep = ensureStep(stepId);
+      stepAnchors.push({
+        index: rows.length,
+        ordinal: currentStep,
+        stepId,
+        kind: seed.type === "request" ? "llm.call" : seed.event.kind,
+        requestIndex:
+          seed.type === "request" ? seed.info.request_index : currentRequest,
+        seed,
+        event: seed.type === "event" ? seed.event : null,
+      });
     }
 
     if (seed.type === "request") {
@@ -871,6 +1062,21 @@ function turnRowsFor(
       error: draft.error,
       status: draft.status,
     });
+  }
+
+  // Step numbers are rendered in the row gutter, so only a non-model step of
+  // a known kind that never produced another row keeps a standalone marker.
+  const representedSteps = new Set<number>();
+  for (const row of rows) {
+    if (row.step !== null) representedSteps.add(row.step);
+  }
+  let inserted = 0;
+  for (const anchor of stepAnchors) {
+    if (representedSteps.has(anchor.ordinal)) continue;
+    if (!isStandaloneStepKind(anchor.kind)) continue;
+    if (isRequestCovered(anchor)) continue;
+    rows.splice(anchor.index + inserted, 0, stepRow(anchor));
+    inserted += 1;
   }
 
   return rows;
@@ -953,6 +1159,9 @@ export function buildLedger(input: BuildLedgerInput): LedgerRow[] {
  * - The query only marks matches; it never removes rows.
  * - A brushed turn selection dims rows outside it (or removes them when
  *   `hideDimmed` is set).
+ * - A brushed time range additionally dims rows whose effective interval does
+ *   not overlap it. The two dim rules are unioned: either one can dim a row.
+ *   A turn header that overlaps the range always stays undimmed.
  * - A collapsed turn keeps only its header.
  * - `collapseCalls` removes tool/subtool rows and annotates the request
  *   separator with the number it hid.
@@ -973,9 +1182,22 @@ export function filterLedger(
 
   const dimmed = new Set<string>();
   const turnIds = options.turnIds ?? null;
-  if (turnIds !== null) {
-    for (const row of rows) {
-      if (row.turn_id !== null && !turnIds.has(row.turn_id)) dimmed.add(row.id);
+  const timeRange = resolveTimeRange(options.timeRange);
+  const intervals = timeRange === null ? null : rowIntervals(rows);
+  for (const row of rows) {
+    const inTimeRange =
+      timeRange !== null &&
+      intervals !== null &&
+      rowOverlapsRange(row, intervals, timeRange);
+    const inTurnSelection =
+      turnIds === null || row.turn_id === null || turnIds.has(row.turn_id);
+
+    // A header spanning the brushed window is context for the rows inside it,
+    // so keep it lit even when its turn id was not part of the selection.
+    if (row.kind === "turn_header" && inTimeRange) continue;
+
+    if (!inTurnSelection || (timeRange !== null && !inTimeRange)) {
+      dimmed.add(row.id);
     }
   }
 
@@ -1109,6 +1331,26 @@ function figuresFromSession(sessionUsage: UsageTotal | null | undefined): Ledger
 }
 
 /**
+ * Find the model call behind a ledger row.
+ *
+ * A row is linked to a call by its `request_index` (and, when present, its
+ * turn). Returns `undefined` when the row has no request or no matching call.
+ */
+export function findCallForRow(
+  row: Pick<LedgerRow, "request_index" | "turn_id">,
+  calls: readonly LlmCallPoint[],
+): LlmCallPoint | undefined {
+  if (row.request_index === null) return undefined;
+  return calls.find(
+    (candidate) =>
+      candidate.request_index === row.request_index &&
+      (row.turn_id === null ||
+        candidate.turn_id === null ||
+        candidate.turn_id === row.turn_id),
+  );
+}
+
+/**
  * Per-request token figures next to the session totals.
  *
  * A row is linked to a call by its `request_index` (and, when present, its
@@ -1119,16 +1361,7 @@ export function usageFor(
   calls: readonly LlmCallPoint[],
   sessionUsage: UsageTotal | null | undefined,
 ): LedgerUsageComparison {
-  let call: LlmCallPoint | undefined;
-  if (row.request_index !== null) {
-    call = calls.find(
-      (candidate) =>
-        candidate.request_index === row.request_index &&
-        (row.turn_id === null ||
-          candidate.turn_id === null ||
-          candidate.turn_id === row.turn_id),
-    );
-  }
+  const call = findCallForRow(row, calls);
   return {
     request: figuresFromCall(call),
     session: figuresFromSession(sessionUsage),

@@ -45,6 +45,7 @@ import { IdleGapMarker } from "../components/IdleGapMarker";
 import { SessionOverview } from "../components/overview/SessionOverview";
 import { SegmentBoundaryNode } from "../components/SegmentBoundaryNode";
 import { SubagentSteps } from "../components/SubagentSteps";
+import { TrajectoryView } from "../components/trajectory/TrajectoryView";
 import {
   EM_DASH,
   formatCount,
@@ -62,7 +63,7 @@ import {
   type TurnRow,
 } from "../lib/session-view";
 
-type View = "turns" | "conversation" | "timeline";
+type View = "trajectory" | "turns" | "conversation" | "timeline";
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -136,7 +137,7 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const [view, setView] = useState<View>("turns");
+  const [view, setView] = useState<View>("trajectory");
   const [overviewTurnIds, setOverviewTurnIds] = useState<ReadonlySet<string> | null>(
     null,
   );
@@ -182,6 +183,52 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
       cancelled = true;
     };
   }, [obsClient, sessionId, reload]);
+
+  // Lightweight live refresh: only while the session is running and only when
+  // the injected client exposes the re-fetch methods. A failed poll is
+  // deliberately silent — the previous snapshot stays on screen.
+  useEffect(() => {
+    if (detail === null) return;
+    if ((detail.summary.status as string) !== "running") return;
+    const client = obsClient as unknown as Record<string, unknown>;
+    const canRefetch = [
+      "getSession",
+      "getSegments",
+      "getTurns",
+      "getLlmCalls",
+    ].every((name) => typeof client[name] === "function");
+    if (!canRefetch) return;
+
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const value = await obsClient.getSession(sessionId);
+          if (cancelled) return;
+          const [segmentPage, turnPage, callPage] = await Promise.all([
+            obsClient.getSegments(sessionId).catch(() => null),
+            obsClient.getTurns(sessionId).catch(() => null),
+            obsClient.getLlmCalls(sessionId).catch(() => null),
+          ]);
+          if (cancelled) return;
+          const fetchedEvents = value.turns.flatMap((turn) => turn.events);
+          startTransition(() => {
+            setDetail(value);
+            setSegments(segmentPage?.items ?? segmentViews(fetchedEvents));
+            setTurns(turnPage?.items ?? turnViews(fetchedEvents));
+            setCalls(callPage?.items ?? llmCallSeries(fetchedEvents));
+          });
+        } catch {
+          // Best-effort polling: keep the last good snapshot.
+        }
+      })();
+    }, 5_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [obsClient, sessionId, detail?.summary.status]);
 
   const events = useMemo(
     () => (detail === null ? [] : toManagedEvents(detail)),
@@ -306,9 +353,15 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
         </div>
       </div>
 
-      {/* View tabs — same controls and active treatment as the console. Turns
-          is the default; Timeline keeps the original full-session waterfall. */}
+      {/* View tabs — same controls and active treatment as the console.
+          Trajectory is the default; Turns keeps the per-turn waterfall and
+          Timeline keeps the original full-session waterfall. */}
       <div role="tablist" aria-label="Session view" className="flex shrink-0 items-center gap-1 pl-3 pr-4">
+        <ViewTab
+          label="Trajectory"
+          active={view === "trajectory"}
+          onClick={() => startTransition(() => setView("trajectory"))}
+        />
         <ViewTab
           label="Turns"
           active={view === "turns"}
@@ -338,8 +391,15 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
         )}
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        {view === "turns" ? (
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        {view === "trajectory" ? (
+          <TrajectoryView
+            summary={summary}
+            segments={segments}
+            turns={turns}
+            calls={calls}
+          />
+        ) : view === "turns" ? (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
             <div className="flex flex-col gap-3 px-3 pb-6 pt-1 sm:px-4">
               <SessionOverview
