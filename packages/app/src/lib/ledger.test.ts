@@ -14,6 +14,7 @@ import {
 import {
   buildLedger,
   filterLedger,
+  firstRowIndexInTimeRange,
   requestTiming,
   SUMMARY_LIMIT,
   tailWindow,
@@ -331,7 +332,6 @@ describe("buildLedger", () => {
       new Set([
         "turn_header",
         "user",
-        "step",
         "request",
         "idle_gap",
         "tool",
@@ -347,6 +347,165 @@ describe("buildLedger", () => {
     const order = rows.map((row) => row.kind);
     expect(order.indexOf("segment_boundary")).toBeLessThan(order.indexOf("compaction"));
     expect(order.indexOf("compaction")).toBeLessThan(order.indexOf("turn_header", 2));
+  });
+
+  it("keeps step numbers on rows instead of emitting a row per step", () => {
+    const rows = buildLedger(fixture());
+
+    expect(byKind(rows, "step")).toHaveLength(0);
+    expect(byKind(rows, "request")[0]?.step).toBe(1);
+    expect(byKind(rows, "tool")[0]?.step).toBe(2);
+    expect(byKind(rows, "subtool")[0]?.step).toBe(3);
+  });
+
+  it("emits a standalone Step row only for a non-model step with no other rows", () => {
+    const turn = turnView("turn_empty", "seg_0", [
+      event("ev_permission", "permission.request", "2026-10-20T10:00:00.000Z", {
+        turn_id: "turn_empty",
+        step_id: "st_permission",
+        attrs: { reason: "needs approval" },
+      }),
+    ], { step_count: 1 });
+
+    const rows = buildLedger({
+      segments: [segmentView("seg_0", { turn_count: 1 })],
+      turns: [turn],
+      calls: [],
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual(["turn_header", "step"]);
+    expect(rows[1]?.summary).toBe("Step 1 · permission");
+    expect(rows[1]?.step).toBe(1);
+    expect(rows[1]?.event_ids).toEqual(["ev_permission"]);
+  });
+
+  it("does not emit standalone Step rows for model calls or lifecycle events", () => {
+    const turn = turnView("turn_model", "seg_0", [
+      event("ev_llm_no_request", "llm.call", "2026-10-20T10:00:00.000Z", {
+        turn_id: "turn_model",
+        step_id: "st_model",
+      }),
+      event("ev_turn_start", "turn.start", "2026-10-20T10:01:00.000Z", {
+        turn_id: "turn_model",
+        step_id: "st_start",
+      }),
+    ], { step_count: 2 });
+
+    const rows = buildLedger({
+      segments: [segmentView("seg_0", { turn_count: 1 })],
+      turns: [turn],
+      calls: [],
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual(["turn_header"]);
+  });
+
+  it("does not emit standalone Step rows for env, context or lifecycle steps", () => {
+    const turn = turnView("turn_noise", "seg_0", [
+      event("ev_env", "env.command", "2026-10-20T10:00:00.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_env",
+        attrs: { command: "ls" },
+      }),
+      event("ev_file", "env.file_edit", "2026-10-20T10:00:01.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_file",
+      }),
+      event("ev_reason", "reasoning", "2026-10-20T10:00:02.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_reason",
+      }),
+      event("ev_prompt", "context.system_prompt", "2026-10-20T10:00:03.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_prompt",
+        attrs: { change: "changed", length_chars: 10 },
+      }),
+      event("ev_tools", "context.tool_catalog", "2026-10-20T10:00:04.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_tools",
+        attrs: { tool_count: 2 },
+      }),
+      event("ev_plan", "plan.update", "2026-10-20T10:00:05.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_plan",
+      }),
+      event("ev_memory", "memory.read", "2026-10-20T10:00:06.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_memory",
+      }),
+      event("ev_skill", "skill.use", "2026-10-20T10:00:07.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_skill",
+      }),
+      event("ev_control", "control.cancel", "2026-10-20T10:00:08.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_control",
+      }),
+      event("ev_outcome", "outcome", "2026-10-20T10:00:09.000Z", {
+        turn_id: "turn_noise",
+        step_id: "st_outcome",
+      }),
+    ], { step_count: 10 });
+
+    const rows = buildLedger({
+      segments: [segmentView("seg_0", { turn_count: 1 })],
+      turns: [turn],
+      calls: [],
+    });
+
+    expect(byKind(rows, "step")).toHaveLength(0);
+    // The projected context rows are still real rows, just not step markers.
+    expect(byKind(rows, "system_prompt")).toHaveLength(1);
+    expect(byKind(rows, "tools_updated")).toHaveLength(1);
+  });
+
+  it("keeps standalone Step rows for permission and approval decisions", () => {
+    const turn = turnView("turn_permission", "seg_0", [
+      event("ev_permission", "permission.request", "2026-10-20T10:00:00.000Z", {
+        turn_id: "turn_permission",
+        step_id: "st_permission",
+      }),
+      event("ev_decision", "permission.decision", "2026-10-20T10:00:01.000Z", {
+        turn_id: "turn_permission",
+        step_id: "st_decision",
+        attrs: { decision: "approve" },
+      }),
+    ], { step_count: 2 });
+
+    const rows = buildLedger({
+      segments: [segmentView("seg_0", { turn_count: 1 })],
+      turns: [turn],
+      calls: [],
+    });
+
+    expect(byKind(rows, "step").map((row) => row.summary)).toEqual([
+      "Step 1 · permission",
+      "Step 2 · permission",
+    ]);
+  });
+
+  it("does not emit a Step row for a step already covered by a request separator", () => {
+    const turn = turnView("turn_covered", "seg_0", [
+      event("ev_llm_covered", "llm.call", "2026-10-20T10:00:00.000Z", {
+        turn_id: "turn_covered",
+        step_id: "st_llm_covered",
+        attrs: { request_index: 1 },
+      }),
+      event("ev_reasoning_covered", "reasoning", "2026-10-20T10:01:00.000Z", {
+        turn_id: "turn_covered",
+        step_id: "st_reasoning_covered",
+        attrs: { request_index: 1 },
+      }),
+    ], { step_count: 2 });
+
+    const rows = buildLedger({
+      segments: [segmentView("seg_0", { turn_count: 1 })],
+      turns: [turn],
+      calls: [],
+    });
+
+    expect(byKind(rows, "request")).toHaveLength(1);
+    expect(byKind(rows, "step")).toHaveLength(0);
   });
 
   it("builds stable unique ids and one-line summaries", () => {
@@ -743,6 +902,82 @@ describe("filterLedger", () => {
     expect(filtered.dimmed.has(byKind(all, "turn_header")[0]!.id)).toBe(false);
     // Turn-less chrome (segment boundary, gap before a segment) is kept lit.
     expect(filtered.dimmed.has(byKind(all, "segment_boundary")[0]!.id)).toBe(false);
+  });
+
+  it("dims rows outside a brushed time range and keeps overlapping headers", () => {
+    const all = rows();
+    const headers = byKind(all, "turn_header");
+    const range = {
+      start: Date.parse("2026-10-20T10:00:30.000Z"),
+      end: Date.parse("2026-10-20T10:01:30.000Z"),
+    };
+    const filtered = filterLedger(all, { timeRange: range });
+
+    // Turn 1's header spans 10:00–11:05, so it is context for the window.
+    expect(filtered.dimmed.has(headers[0]!.id)).toBe(false);
+    expect(filtered.dimmed.has(headers[1]!.id)).toBe(true);
+
+    expect(filtered.dimmed.has(byKind(all, "user")[0]!.id)).toBe(true);
+    expect(filtered.dimmed.has(byKind(all, "request")[0]!.id)).toBe(false);
+    expect(filtered.dimmed.has(byKind(all, "tool")[0]!.id)).toBe(true);
+    expect(filtered.rows).toHaveLength(all.length);
+  });
+
+  it("gives rows with no timestamp the nearest previous row's time", () => {
+    const makeRow = (
+      id: string,
+      start: string | null,
+      end: string | null = null,
+    ): LedgerRow => ({
+      id,
+      kind: "assistant",
+      turn_id: "turn_1",
+      segment_id: "seg_0",
+      step: null,
+      request_index: null,
+      start,
+      end,
+      event_ids: [],
+      summary: id,
+      error: false,
+      status: "ok",
+    });
+    const timed = [
+      makeRow("before", "2026-10-20T09:00:00.000Z"),
+      makeRow("known", "2026-10-20T10:00:05.000Z"),
+      makeRow("inherited", null),
+      makeRow("later", "2026-10-20T11:00:00.000Z"),
+    ];
+    const filtered = filterLedger(timed, {
+      timeRange: {
+        start: Date.parse("2026-10-20T10:00:05.000Z"),
+        end: Date.parse("2026-10-20T10:00:05.500Z"),
+      },
+    });
+
+    expect(filtered.dimmed.has("before")).toBe(true);
+    expect(filtered.dimmed.has("known")).toBe(false);
+    expect(filtered.dimmed.has("inherited")).toBe(false);
+    expect(filtered.dimmed.has("later")).toBe(true);
+    expect(
+      firstRowIndexInTimeRange(timed, {
+        start: Date.parse("2026-10-20T10:00:05.000Z"),
+        end: Date.parse("2026-10-20T10:00:05.500Z"),
+      }),
+    ).toBe(1);
+  });
+
+  it("hides time-dimmed rows when hideDimmed is enabled", () => {
+    const all = rows();
+    const range = {
+      start: Date.parse("2026-10-20T10:00:30.000Z"),
+      end: Date.parse("2026-10-20T10:01:30.000Z"),
+    };
+    const filtered = filterLedger(all, { timeRange: range, hideDimmed: true });
+
+    expect(filtered.rows.every((row) => !filtered.dimmed.has(row.id))).toBe(true);
+    expect(filtered.rows.length).toBeLessThan(all.length);
+    expect(filtered.rows.some((row) => row.turn_id === "turn_2")).toBe(false);
   });
 
   it("removes dimmed rows when hideDimmed is enabled", () => {
