@@ -1,0 +1,27 @@
+{
+  "name": "openmatel",
+  "version": "0.1.0",
+  "description": "Local agent observability for coding sessions — zero services, one SQLite file.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "openmatel": "dist/openmatel.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@openmatel/core": "workspace:*",
+    "@openmatel/source-local": "workspace:*",
+    "@openmatel/store-sqlite": "workspace:*",
+    "esbuild": "^0.28.2",
+    "vitest": "^3"
+  }
+}

@@ -9,6 +9,8 @@
     { "path": "./packages/stores/sqlite" },
     { "path": "./packages/stores/sqlite/tsconfig.test.json" },
     { "path": "./packages/sources/local" },
-    { "path": "./packages/sources/local/tsconfig.test.json" }
+    { "path": "./packages/sources/local/tsconfig.test.json" },
+    { "path": "./packages/cli" },
+    { "path": "./packages/cli/tsconfig.test.json" }
   ]
 }
