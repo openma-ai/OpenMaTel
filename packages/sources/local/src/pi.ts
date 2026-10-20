@@ -38,6 +38,7 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  llmCallAttrs,
   parseJsonlText,
   sessionStartAttrs,
   textFromContent,
@@ -364,11 +365,12 @@ function handleAssistantMessage(
   // The call of the model itself.
   const usage = isPlainObject(message.usage) ? message.usage : undefined;
   const cost = usage && isPlainObject(usage.cost) ? usage.cost : undefined;
-  const llmAttrs: Record<string, unknown> = {};
-  if (state.provider !== undefined) llmAttrs.provider = state.provider;
-  if (state.model !== undefined) llmAttrs.model = state.model;
   const stopReason = asString(message.stopReason);
-  if (stopReason !== undefined) llmAttrs.stop_reason = stopReason;
+  const llmAttrs = llmCallAttrs({
+    provider: state.provider,
+    model: state.model,
+    stopReason,
+  });
 
   state.events.push(
     state.factory.create({

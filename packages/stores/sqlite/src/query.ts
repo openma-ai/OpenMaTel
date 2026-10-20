@@ -199,8 +199,8 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
       ? (JSON.parse(row.summary_json) as SessionSummary)
       : summarizeSession(events);
 
-    const { turns } = buildSessionTree(events);
-    return { summary, events, turns };
+    const tree = buildSessionTree(events);
+    return { summary, events, turns: tree.turns, segments: tree.segments };
   };
 
   /* ---------------------------------------------------------------------- */

@@ -214,7 +214,14 @@ describe("sqlite store", () => {
       const raw = new DatabaseSync(path);
       try {
         const applied = raw.prepare("SELECT id FROM _migrations ORDER BY id").all();
-        expect(applied.map((row) => Number(row.id))).toEqual([1]);
+        expect(applied.map((row) => Number(row.id))).toEqual([1, 2]);
+
+        const columns = raw.prepare("PRAGMA table_info(events)").all();
+        expect(columns.some((column) => String(column.name) === "segment_id")).toBe(true);
+        const indexes = raw.prepare("PRAGMA index_list(events)").all();
+        expect(indexes.some((index) => String(index.name) === "events_session_segment_ts")).toBe(
+          true,
+        );
       } finally {
         raw.close();
       }
@@ -273,6 +280,7 @@ describe("sqlite store", () => {
           event_id: "ev_search",
           project_id: "proj_search",
           session_id: "ss_search",
+          segment_id: "seg_0",
           kind: "session.start",
           ts: "2026-05-04T10:00:00.000Z",
           attrs: {
@@ -316,6 +324,7 @@ describe("sqlite store", () => {
           event_id: `ev_page_${index}`,
           project_id: "proj_page",
           session_id: `ss_page_${index}`,
+          segment_id: "seg_0",
           kind: "session.start",
           ts: new Date(Date.parse("2026-05-05T10:00:00.000Z") + index * 60_000).toISOString(),
           attrs: { harness: { name: "claude-code" }, title: `page ${index}` },
@@ -366,6 +375,7 @@ describe("sqlite store", () => {
           event_id: "ev_step_1",
           project_id: "proj_steps",
           session_id: "ss_steps",
+          segment_id: "seg_0",
           kind: "tool.call",
           ts: "2026-05-06T10:00:00.000Z",
           turn_id: "turn_steps",
@@ -379,6 +389,7 @@ describe("sqlite store", () => {
           event_id: "ev_step_2",
           project_id: "proj_steps",
           session_id: "ss_steps",
+          segment_id: "seg_0",
           kind: "tool.call",
           ts: "2026-05-06T10:00:01.000Z",
           turn_id: "turn_steps",
@@ -392,12 +403,20 @@ describe("sqlite store", () => {
           event_id: "ev_step_3",
           project_id: "proj_steps",
           session_id: "ss_steps",
+          segment_id: "seg_0",
           kind: "llm.call",
           ts: "2026-05-06T10:00:02.000Z",
           turn_id: "turn_steps",
           step_id: "st_3",
           status: "ok",
-          attrs: { provider: "anthropic", model: "claude-opus" },
+          attrs: {
+            provider: "anthropic",
+            model: "claude-opus",
+            context_tokens: null,
+            stop_reason: null,
+            latency_ms: null,
+            ttft_ms: null,
+          },
           source: { name: "test", format: "json" },
         },
       ]);
@@ -437,6 +456,7 @@ describe("sqlite store", () => {
           event_id: "ev_content",
           project_id: "proj_content",
           session_id: "ss_content",
+          segment_id: "seg_0",
           kind: "tool.call",
           ts: "2026-05-07T10:00:00.000Z",
           step_id: "st_content",
@@ -547,6 +567,7 @@ const perfEvents = (sessions: number, perSession: number): AgentEvent[] => {
         event_id: `ev_perf_${session}_${index}`,
         project_id: "proj_perf",
         session_id,
+        segment_id: "seg_0",
         ts: new Date(base + offset + index * 1000).toISOString(),
         attrs: {},
         source: { name: "perf", format: "json" },

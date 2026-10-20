@@ -7,6 +7,7 @@ const validEvent = (): AgentEvent => ({
   event_id: "ev_0123456789abcdef0123456789abcdef",
   project_id: "proj_1",
   session_id: "ss_0123456789abcdef0123456789abcdef",
+  segment_id: "seg_0",
   turn_id: "turn_1",
   step_id: "st_0123456789abcdef0123456789abcdef",
   ts: "2026-01-02T03:04:05.000Z",
@@ -78,10 +79,12 @@ describe("validateEvent", () => {
     delete event.event_id;
     delete event.project_id;
     delete event.session_id;
+    delete event.segment_id;
     const errors = errorsOf(event);
     expect(errors).toContain("event_id: must be a non-empty string");
     expect(errors).toContain("project_id: must be a non-empty string");
     expect(errors).toContain("session_id: must be a non-empty string");
+    expect(errors).toContain("segment_id: must be a non-empty string");
   });
 
   it("requires an ISO timestamp", () => {
@@ -154,5 +157,56 @@ describe("validateEvent", () => {
   it("reports every problem at once", () => {
     const errors = errorsOf({ ...validEvent(), kind: "nope", status: "nope", attrs: "nope" });
     expect(errors.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("requires the llm.call attributes even when the values are unknown", () => {
+    const event = validEvent();
+    event.kind = "llm.call";
+    event.step_id = "st_llm";
+    event.attrs = {};
+    const errors = errorsOf(event);
+
+    expect(errors).toContain("attrs.provider: must be present and be a string or null");
+    expect(errors).toContain("attrs.model: must be present and be a string or null");
+    expect(errors).toContain("attrs.context_tokens: must be present and be a number or null");
+    expect(errors).toContain("attrs.stop_reason: must be present and be a string or null");
+    expect(errors).toContain("attrs.latency_ms: must be present and be a number or null");
+    expect(errors).toContain("attrs.ttft_ms: must be present and be a number or null");
+  });
+
+  it("accepts an llm.call whose required attributes are explicitly null", () => {
+    const event = validEvent();
+    event.kind = "llm.call";
+    event.step_id = "st_llm";
+    event.attrs = {
+      provider: null,
+      model: null,
+      context_tokens: null,
+      stop_reason: null,
+      latency_ms: null,
+      ttft_ms: null,
+      request_id: null,
+      context_window: null,
+      derived: ["context_tokens"],
+    };
+    event.usage = null;
+    expect(validateEvent(event)).toEqual({ ok: true });
+  });
+
+  it("accepts a segment.boundary event", () => {
+    const event = validEvent();
+    event.kind = "segment.boundary";
+    event.segment_id = "seg_1";
+    delete event.step_id;
+    event.attrs = {
+      reason: "compaction",
+      context_tokens_before: 100,
+      context_tokens_after: 40,
+      tokens_removed: 60,
+      summary: "compacted",
+      parent_segment_id: "seg_0",
+      derived: false,
+    };
+    expect(validateEvent(event)).toEqual({ ok: true });
   });
 });

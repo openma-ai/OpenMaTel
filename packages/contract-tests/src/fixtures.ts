@@ -15,6 +15,7 @@
  */
 
 import {
+  FIRST_SEGMENT_ID,
   SCHEMA_VERSION,
   eventId,
   sessionId,
@@ -74,6 +75,7 @@ export function makeEvent(partial: EventOverrides): AgentEvent {
     event_id: eventId(["contract", stableStringify(defined)]),
     project_id: "proj_contract",
     session_id: sessionId("contract", "default"),
+    segment_id: FIRST_SEGMENT_ID,
     ts: DEFAULT_TS,
     attrs: {},
     source: { ...DEFAULT_SOURCE },
@@ -136,6 +138,10 @@ export const SAMPLE_TS = "2026-01-02T03:00:00.000Z";
 /** Turn ids of the sample session. */
 export const SAMPLE_TURN_1 = "turn_sample_1";
 export const SAMPLE_TURN_2 = "turn_sample_2";
+
+/** Segment ids of the sample session. */
+export const SAMPLE_SEGMENT_1 = "seg_0";
+export const SAMPLE_SEGMENT_2 = "seg_1";
 
 /** Step ids of the sample session. */
 export const SAMPLE_STEPS = {
@@ -212,7 +218,15 @@ export function sampleSessions(projectId: string): AgentEvent[] {
       ts: at(3),
       end_ts: at(5),
       status: "ok",
-      attrs: { provider: "anthropic", model: "claude-opus", request_id: "req_1", finish_reason: "end_turn" },
+      attrs: {
+        provider: "anthropic",
+        model: "claude-opus",
+        context_tokens: null,
+        stop_reason: "end_turn",
+        latency_ms: 2000,
+        ttft_ms: null,
+        request_id: "req_1",
+      },
       usage: fullUsage(),
     }),
     makeEvent({
@@ -260,7 +274,15 @@ export function sampleSessions(projectId: string): AgentEvent[] {
       ts: at(12),
       end_ts: at(14),
       status: "ok",
-      attrs: { provider: "anthropic", model: "claude-opus", request_id: "req_2", finish_reason: "end_turn" },
+      attrs: {
+        provider: "anthropic",
+        model: "claude-opus",
+        context_tokens: null,
+        stop_reason: "end_turn",
+        latency_ms: 2000,
+        ttft_ms: null,
+        request_id: "req_2",
+      },
       usage: zeroUsage(),
     }),
     makeEvent({
@@ -292,7 +314,15 @@ export function sampleSessions(projectId: string): AgentEvent[] {
       ts: at(17),
       end_ts: at(19),
       status: "ok",
-      attrs: { provider: "anthropic", model: "claude-opus", request_id: "req_3", finish_reason: "end_turn" },
+      attrs: {
+        provider: null,
+        model: null,
+        context_tokens: null,
+        stop_reason: null,
+        latency_ms: null,
+        ttft_ms: null,
+        request_id: null,
+      },
       usage: null,
     }),
     makeEvent({
@@ -317,9 +347,26 @@ export function sampleSessions(projectId: string): AgentEvent[] {
     }),
     makeEvent({
       ...common,
+      event_id: "ev_sample_segment_boundary",
+      kind: "segment.boundary",
+      segment_id: SAMPLE_SEGMENT_2,
+      ts: at(30),
+      attrs: {
+        reason: "compaction",
+        context_tokens_before: 120,
+        context_tokens_after: 40,
+        tokens_removed: 80,
+        summary: "older turns compacted",
+        parent_segment_id: SAMPLE_SEGMENT_1,
+        derived: false,
+      },
+    }),
+    makeEvent({
+      ...common,
       event_id: "ev_sample_turn_2_start",
       kind: "turn.start",
       turn_id: SAMPLE_TURN_2,
+      segment_id: SAMPLE_SEGMENT_2,
       ts: at(40),
       attrs: { trigger: "user", model: "claude-opus" },
     }),
@@ -328,11 +375,20 @@ export function sampleSessions(projectId: string): AgentEvent[] {
       event_id: "ev_sample_llm_4",
       kind: "llm.call",
       turn_id: SAMPLE_TURN_2,
+      segment_id: SAMPLE_SEGMENT_2,
       step_id: SAMPLE_STEPS.llm_4,
       ts: at(41),
       end_ts: at(43),
       status: "ok",
-      attrs: { provider: "anthropic", model: "claude-opus", request_id: "req_4", finish_reason: "end_turn" },
+      attrs: {
+        provider: "anthropic",
+        model: "claude-opus",
+        context_tokens: null,
+        stop_reason: "end_turn",
+        latency_ms: 2000,
+        ttft_ms: null,
+        request_id: "req_4",
+      },
       usage: fullUsage({ input_tokens: 10, output_tokens: 5 }),
     }),
     makeEvent({
@@ -340,6 +396,7 @@ export function sampleSessions(projectId: string): AgentEvent[] {
       event_id: "ev_sample_turn_2_end",
       kind: "turn.end",
       turn_id: SAMPLE_TURN_2,
+      segment_id: SAMPLE_SEGMENT_2,
       ts: at(44),
       end_ts: at(45),
       status: "ok",
@@ -350,6 +407,7 @@ export function sampleSessions(projectId: string): AgentEvent[] {
       ...common,
       event_id: "ev_sample_session_end",
       kind: "session.end",
+      segment_id: SAMPLE_SEGMENT_2,
       ts: at(50),
       status: "ok",
       attrs: { end_reason: "completed", title: SAMPLE_TITLE },

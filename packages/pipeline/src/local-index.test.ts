@@ -25,6 +25,7 @@ const makeEvent = (event_id: string): AgentEvent => ({
   event_id,
   project_id: "local",
   session_id: "ss_local",
+  segment_id: "seg_0",
   ts: "2026-01-01T00:00:00.000Z",
   kind: "message.user",
   attrs: {},

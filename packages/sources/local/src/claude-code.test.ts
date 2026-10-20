@@ -282,7 +282,7 @@ describe("@openmatel/source-local — Claude Code synthetic models", () => {
     expect(firstEventOfKind(events, "session.start")?.attrs.model).toBe("claude-opus-5-5");
     const llmModels = eventsOfKind(events, "llm.call")
       .map((call) => call.attrs.model)
-      .filter((model) => model !== undefined);
+      .filter((model) => model !== undefined && model !== null);
     expect(llmModels).toEqual(["claude-opus-5-5"]);
   });
 
@@ -290,6 +290,6 @@ describe("@openmatel/source-local — Claude Code synthetic models", () => {
     const events = normalizeClaudeCodeFile(file("synthetic-only"), [record(1, "<synthetic>")]);
 
     expect(firstEventOfKind(events, "session.start")?.attrs.model).toBeUndefined();
-    expect(eventsOfKind(events, "llm.call")[0]?.attrs.model).toBeUndefined();
+    expect(eventsOfKind(events, "llm.call")[0]?.attrs.model).toBeNull();
   });
 });

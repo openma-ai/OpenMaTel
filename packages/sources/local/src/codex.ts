@@ -43,6 +43,7 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  llmCallAttrs,
   parseJsonObject,
   parseJsonlText,
   sessionStartAttrs,
@@ -363,9 +364,7 @@ function endTurn(state: CodexState, ts: string, ref: string, stopReason: string)
 function ensureLlmCall(state: CodexState, ts: string, ref: string): AgentEvent {
   if (state.pendingLlm !== undefined) return state.pendingLlm;
 
-  const attrs: Record<string, unknown> = {};
-  if (state.provider !== undefined) attrs.provider = state.provider;
-  if (state.model !== undefined) attrs.model = state.model;
+  const attrs = llmCallAttrs({ provider: state.provider, model: state.model });
 
   const event = state.factory.create({
     line: state.scope.line,
