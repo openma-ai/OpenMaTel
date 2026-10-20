@@ -107,6 +107,21 @@ pnpm test       # vitest run
 
 `pnpm lint` enforces the architecture rules mechanically: `packages/core` must have zero dependencies, no package may pull in OpenMA internals, and the UI must not depend on a store implementation.
 
+## Local CLI
+
+After `pnpm build`, `npx openmatel` (or `openmatel serve`) indexes the local
+Claude Code, Codex, dsh and pi session files and serves the web UI. Unless
+`--no-index` is given, the server keeps watching: every three seconds it runs a
+cheap incremental index that re-reads only files whose size or mtime changed,
+so events appended after startup show up in the session detail view.
+`--watch-interval <ms>` sets that delay and `--watch-interval 0` disables it;
+`--no-index` also disables the watcher. Watch passes never overlap, and an
+indexing error is logged once without stopping the server.
+
+```sh
+npx openmatel serve --port 4319 --watch-interval 3000
+```
+
 ## Third-party code
 
 The web console reuses the actual Open Managed Agents console UI rather than a

@@ -21,6 +21,7 @@ import { createApp, type StaticAssets } from "@openmatel/server";
 import { serveNode } from "@openmatel/server/node";
 
 import { openStore } from "./store.js";
+import { startIndexWatch, type IndexWatchOptions } from "./watch.js";
 import { VERSION } from "./version.js";
 
 /** Options of the low-level {@link startServe}. */
@@ -39,6 +40,11 @@ export interface StartServeOptions {
   staticDir?: string;
   /** Install SIGINT/SIGTERM handlers (default `true`). */
   handleSignals?: boolean;
+  /**
+   * Optional periodic incremental index while the server is running. The
+   * higher-level `serve` command enables it unless `--no-index` was given.
+   */
+  watch?: IndexWatchOptions;
 }
 
 /** A running local server. */
@@ -202,6 +208,13 @@ const isPortBusy = (error: unknown): boolean =>
  * Port `0` is left to the OS and never retried.
  */
 export async function startServe(options: StartServeOptions = {}): Promise<ServeHandle> {
+  if (
+    options.watch !== undefined &&
+    (!Number.isFinite(options.watch.intervalMs) || options.watch.intervalMs < 0)
+  ) {
+    throw new TypeError("watch.intervalMs must be a non-negative finite number");
+  }
+
   const host = options.host ?? DEFAULT_HOST;
   const requestedPort = options.port ?? DEFAULT_PORT;
   const token = options.token ?? createToken();
@@ -253,6 +266,8 @@ export async function startServe(options: StartServeOptions = {}): Promise<Serve
   const port = typeof address === "object" && address !== null ? address.port : requestedPort;
   const url = `http://${host}:${port}/?token=${encodeURIComponent(token)}`;
 
+  const watcher = options.watch !== undefined ? startIndexWatch(options.watch) : undefined;
+
   let closed = false;
   const shutdown = (): void => {
     void close().finally(() => {
@@ -267,6 +282,7 @@ export async function startServe(options: StartServeOptions = {}): Promise<Serve
       process.off("SIGINT", shutdown);
       process.off("SIGTERM", shutdown);
     }
+    await watcher?.stop();
     const stopped = new Promise<void>((resolve, reject) => {
       server?.close((error) => (error ? reject(error) : resolve()));
     });

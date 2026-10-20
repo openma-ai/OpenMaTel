@@ -226,6 +226,7 @@ export function TrajectoryView({
       pendingReveal === null &&
       shouldFollowTail({
         status: summary.status,
+        endedAt: summary.ended_at,
         atBottom,
         rowsGrew: grew,
       })
@@ -238,6 +239,7 @@ export function TrajectoryView({
     atBottom,
     pendingReveal,
     summary.status,
+    summary.ended_at,
     scrollToBottom,
     rows,
   ]);

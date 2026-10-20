@@ -48,6 +48,11 @@ import { err, out, processIO, type CommandIO } from "./io.js";
 import { openBrowser, startServe, type ServeHandle } from "./serve.js";
 import { databasePath, openStore } from "./store.js";
 import { VERSION } from "./version.js";
+import {
+  createWatchIO,
+  DEFAULT_WATCH_INTERVAL_MS,
+  type IndexWatchOptions,
+} from "./watch.js";
 
 /** Every source of milestone 1, in the order they are listed in the design. */
 export const ALL_SOURCES = ["claude-code", "codex", "dsh", "pi"] as const;
@@ -120,6 +125,11 @@ export interface ServeOptions {
   home?: string;
   /** Sources to index when indexing. */
   sources?: readonly string[];
+  /**
+   * Milliseconds between incremental re-index passes while serving. `0`
+   * disables the periodic pass. Default: 3000.
+   */
+  watchInterval?: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -426,6 +436,18 @@ export function parseServeArgs(args: readonly string[]): ServeOptions {
         }
         options.index = false;
         break;
+      case "watch-interval": {
+        const { value, next } = optionValue(args, index, option);
+        const interval = Number(value);
+        if (!Number.isInteger(interval) || interval < 0) {
+          throw new UsageError(
+            `--watch-interval must be a non-negative integer in milliseconds (got "${value}")`,
+          );
+        }
+        options.watchInterval = interval;
+        index = next;
+        break;
+      }
       case "data": {
         const { value, next } = optionValue(args, index, option);
         options.dataDir = value;
@@ -864,22 +886,32 @@ export async function runServe(
   io: CommandIO = processIO,
 ): Promise<ServeHandle> {
   const dataDir = resolveDataDir(options.dataDir);
+  const indexOptions: IndexOptions = {
+    ...(options.home !== undefined ? { home: options.home } : {}),
+    ...(options.sources !== undefined ? { sources: options.sources } : {}),
+    dataDir,
+  };
 
   if (options.index !== false) {
-    await runIndex(
-      {
-        ...(options.home !== undefined ? { home: options.home } : {}),
-        ...(options.sources !== undefined ? { sources: options.sources } : {}),
-        dataDir,
-      },
-      io,
-    );
+    await runIndex(indexOptions, io);
+  }
+
+  const watchInterval = options.watchInterval ?? DEFAULT_WATCH_INTERVAL_MS;
+  let watch: IndexWatchOptions | undefined;
+  if (options.index !== false && watchInterval > 0) {
+    const watchOutput = createWatchIO(io);
+    watch = {
+      intervalMs: watchInterval,
+      run: () => runIndex(indexOptions, watchOutput),
+      onError: (error) => err(watchOutput, `error: watch: ${messageOf(error)}`),
+    };
   }
 
   const handle = await startServe({
     dataDir,
     ...(options.host !== undefined ? { host: options.host } : {}),
     ...(options.port !== undefined ? { port: options.port } : {}),
+    ...(watch !== undefined ? { watch } : {}),
     open: false,
   });
 
@@ -931,6 +963,9 @@ serve options:
   --host <addr>      Interface to bind (default: 127.0.0.1)
   --no-open          Do not open the browser
   --no-index         Serve the existing database without indexing first
+  --watch-interval <ms>
+                     Re-index changed files every <ms> while serving
+                     (default: 3000; 0 disables periodic re-indexing)
   --data <dir>       Data directory (default: $OPENMATEL_HOME or ~/.openmatel)
   --home <dir>       Home directory to scan when indexing (default: ~)
   --sources <list>   Sources to index: ${ALL_SOURCES.join(", ")} (default: all)

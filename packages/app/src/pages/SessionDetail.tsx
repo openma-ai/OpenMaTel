@@ -3,6 +3,7 @@ import {
   startTransition,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router";
@@ -36,6 +37,13 @@ import { ManagedSessionConversation } from "@/components/session/ManagedSessionC
 import { TimelineView } from "@/components/timeline/TimelineView";
 import { Button } from "@/components/ui/button";
 import { formatDuration, formatRelative } from "@/lib/format";
+import {
+  sameSessionRevision,
+  SESSION_POLL_INTERVAL_MS,
+  sessionRevision,
+  shouldPoll,
+  type SessionRevision,
+} from "../lib/live";
 import { useTheme } from "@console-shims/lib/theme";
 
 import { client } from "../client";
@@ -141,9 +149,11 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
   const [overviewTurnIds, setOverviewTurnIds] = useState<ReadonlySet<string> | null>(
     null,
   );
+  const revisionRef = useRef<SessionRevision | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    revisionRef.current = null;
     setLoading(true);
     setError(null);
     setSegments([]);
@@ -154,6 +164,7 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
     const load = async (): Promise<void> => {
       const value = await obsClient.getSession(sessionId);
       if (cancelled) return;
+      revisionRef.current = sessionRevision(value);
       setDetail(value);
 
       const events = value.turns.flatMap((turn) => turn.events);
@@ -184,12 +195,12 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
     };
   }, [obsClient, sessionId, reload]);
 
-  // Lightweight live refresh: only while the session is running and only when
-  // the injected client exposes the re-fetch methods. A failed poll is
-  // deliberately silent — the previous snapshot stays on screen.
+  // Lightweight live refresh. Local sources can still be writing a file whose
+  // summary says `ok`, so "live" is based on the status *and* the age of the
+  // last event. Polling pauses while the page is hidden, and an unchanged
+  // snapshot is ignored so identical fetches do not churn React state.
   useEffect(() => {
     if (detail === null) return;
-    if ((detail.summary.status as string) !== "running") return;
     const client = obsClient as unknown as Record<string, unknown>;
     const canRefetch = [
       "getSession",
@@ -200,35 +211,94 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
     if (!canRefetch) return;
 
     let cancelled = false;
-    const timer = window.setInterval(() => {
-      void (async () => {
-        try {
-          const value = await obsClient.getSession(sessionId);
-          if (cancelled) return;
-          const [segmentPage, turnPage, callPage] = await Promise.all([
-            obsClient.getSegments(sessionId).catch(() => null),
-            obsClient.getTurns(sessionId).catch(() => null),
-            obsClient.getLlmCalls(sessionId).catch(() => null),
-          ]);
-          if (cancelled) return;
-          const fetchedEvents = value.turns.flatMap((turn) => turn.events);
-          startTransition(() => {
-            setDetail(value);
-            setSegments(segmentPage?.items ?? segmentViews(fetchedEvents));
-            setTurns(turnPage?.items ?? turnViews(fetchedEvents));
-            setCalls(callPage?.items ?? llmCallSeries(fetchedEvents));
-          });
-        } catch {
-          // Best-effort polling: keep the last good snapshot.
+    let timer: number | undefined;
+    let inFlight = false;
+
+    const visibilityState = (): string =>
+      typeof document === "undefined" ? "visible" : document.visibilityState;
+
+    const stillLive = (): boolean =>
+      shouldPoll({
+        status: detail.summary.status,
+        endedAt: detail.summary.ended_at,
+        visibilityState: visibilityState(),
+        now: Date.now(),
+      });
+
+    function clearTimer(): void {
+      if (timer === undefined) return;
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+
+    function schedule(): void {
+      if (cancelled) return;
+      clearTimer();
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        void poll();
+      }, SESSION_POLL_INTERVAL_MS);
+    }
+
+    async function poll(): Promise<void> {
+      if (cancelled || inFlight || !stillLive()) return;
+      inFlight = true;
+      try {
+        const value = await obsClient.getSession(sessionId);
+        if (cancelled) return;
+        const nextRevision = sessionRevision(value);
+        const previous = revisionRef.current;
+        if (previous !== null && sameSessionRevision(previous, nextRevision)) {
+          return;
         }
-      })();
-    }, 5_000);
+
+        const [segmentPage, turnPage, callPage] = await Promise.all([
+          obsClient.getSegments(sessionId).catch(() => null),
+          obsClient.getTurns(sessionId).catch(() => null),
+          obsClient.getLlmCalls(sessionId).catch(() => null),
+        ]);
+        if (cancelled) return;
+
+        revisionRef.current = nextRevision;
+        const fetchedEvents = value.turns.flatMap((turn) => turn.events);
+        startTransition(() => {
+          setDetail(value);
+          setSegments(segmentPage?.items ?? segmentViews(fetchedEvents));
+          setTurns(turnPage?.items ?? turnViews(fetchedEvents));
+          setCalls(callPage?.items ?? llmCallSeries(fetchedEvents));
+        });
+      } catch {
+        // Best-effort polling: keep the last good snapshot.
+      } finally {
+        inFlight = false;
+        if (!cancelled && stillLive()) schedule();
+      }
+    }
+
+    const onVisibilityChange = (): void => {
+      if (cancelled) return;
+      if (visibilityState() === "hidden") {
+        clearTimer();
+        return;
+      }
+      if (timer === undefined && !inFlight && stillLive()) void poll();
+    };
+
+    if (stillLive()) schedule();
+    else clearTimer();
+
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      clearTimer();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
-  }, [obsClient, sessionId, detail?.summary.status]);
+  }, [obsClient, sessionId, detail]);
 
   const events = useMemo(
     () => (detail === null ? [] : toManagedEvents(detail)),
