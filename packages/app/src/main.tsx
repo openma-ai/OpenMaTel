@@ -14,6 +14,7 @@ import "./index.css";
 
 import { applyInitialTheme } from "@console-shims/lib/theme";
 import { AppShell } from "@/components/AppShell";
+import { shortenId } from "@/lib/format";
 
 import { SessionDetailPage } from "./pages/SessionDetail";
 import { SessionsListPage } from "./pages/SessionsList";
@@ -34,7 +35,10 @@ const router = createBrowserRouter([
             path: ":id",
             element: <SessionDetailPage />,
             handle: {
-              crumb: (match: UIMatch) => (match.params.id as string | undefined) ?? "Session",
+              crumb: (match: UIMatch) => {
+                const id = match.params.id as string | undefined;
+                return id === undefined || id === "" ? "Session" : shortenId(id);
+              },
             },
           },
         ],

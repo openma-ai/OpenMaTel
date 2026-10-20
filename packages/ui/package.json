@@ -1,7 +1,7 @@
 {
   "name": "@openmatel/ui",
   "version": "0.1.0",
-  "description": "React component library for the OpenMaTel observability console.",
+  "description": "Data boundary (ObsClient/provider) and formatters for OpenMaTel.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

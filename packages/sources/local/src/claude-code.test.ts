@@ -246,3 +246,50 @@ describe("@openmatel/source-local — Claude Code side chains", () => {
     expect(countOfKind(sideEvents, "message.user")).toBe(2);
   });
 });
+
+describe("@openmatel/source-local — Claude Code synthetic models", () => {
+  const record = (line: number, model: string): RawRecord => ({
+    source: "claude-code",
+    ref: `/tmp/synthetic.jsonl#L${line}`,
+    line,
+    data: {
+      type: "assistant",
+      uuid: `a${line}`,
+      timestamp: `2026-10-19T10:00:0${line}.000Z`,
+      message: {
+        role: "assistant",
+        model,
+        content: [{ type: "text", text: `reply-${line}` }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    },
+  });
+
+  const file = (name: string): SessionFile => ({
+    source: "claude-code",
+    path: `/tmp/${name}.jsonl`,
+    size: 0,
+    mtimeMs: 0,
+    sourceSessionId: name,
+  });
+
+  it("ignores <synthetic> and keeps the last real model", () => {
+    const events = normalizeClaudeCodeFile(file("mixed"), [
+      record(1, "<synthetic>"),
+      record(2, "claude-opus-5-5"),
+    ]);
+
+    expect(firstEventOfKind(events, "session.start")?.attrs.model).toBe("claude-opus-5-5");
+    const llmModels = eventsOfKind(events, "llm.call")
+      .map((call) => call.attrs.model)
+      .filter((model) => model !== undefined);
+    expect(llmModels).toEqual(["claude-opus-5-5"]);
+  });
+
+  it("leaves the session model unknown when only <synthetic> was reported", () => {
+    const events = normalizeClaudeCodeFile(file("synthetic-only"), [record(1, "<synthetic>")]);
+
+    expect(firstEventOfKind(events, "session.start")?.attrs.model).toBeUndefined();
+    expect(eventsOfKind(events, "llm.call")[0]?.attrs.model).toBeUndefined();
+  });
+});

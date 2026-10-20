@@ -35,6 +35,8 @@ and are applied by the sync script.
 | `components/RowContextMenu.tsx` | `eb169322f868fb475838d79c2e4bb29060073c8d6dfa894cd8024ac01b89371f` |
 | `components/Skeleton.tsx` | `fabe188237ee04522e340638465b1f9e216de0e01ab64a5a689b7a493d4009b3` |
 | `components/icons.tsx` | `16224cd7791ad20c45e1be89270cd299c3a2c3f12c15046e3e4dd67c9b4768f6` |
+| `components/session/CanonicalSessionTurn.tsx` | `cbde1bd4234210270dd6cf4913e50ab1637d1d36cc5ac7dd2e337412a7ea2a63` |
+| `components/session/ManagedSessionConversation.tsx` | `06bff4809a7b3ef11c7f3724fcacbef31d69bb4a69a13d8649f137e40a741f64` |
 | `components/timeline/TimelineView.tsx` | `5277c0b55e96778e715045983202e466970e92b1efd7a29d67ca38193732e324` |
 | `components/timeline/derive.ts` | `6a3248e5e47d9c918db31ac2dc92a015200a45a602a57bac7adbd7311aebcda6` |
 | `components/timeline/eventTime.ts` | `324bb9ee2f8c11b7c4746181b725a391087441efb141c43292f660b8a2a73161` |
