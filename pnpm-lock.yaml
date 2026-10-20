@@ -18,6 +18,15 @@ importers:
         specifier: ^3.2
         version: 3.2.7(@types/node@24.19.2)
 
+  packages/contract-tests:
+    dependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../core
+      vitest:
+        specifier: ^3
+        version: 3.2.7(@types/node@24.19.2)
+
   packages/core: {}
 
 packages:

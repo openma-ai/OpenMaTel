@@ -1,0 +1,30 @@
+{
+  "name": "@openmatel/contract-tests",
+  "version": "0.1.0",
+  "description": "Shared contract test suites every OpenMaTel adapter must pass (Sink, Query, Normalizer, Bus, pull Source).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@openmatel/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "vitest": "^3"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
