@@ -661,3 +661,36 @@ Session
 | Codex | 格式支持 `compacted`，**本机样本中没有出现** | ✅ `token_count.last_token_usage`（input 含 cached、cached_input、cache_write、output、reasoning） | ❌ | ❌ |
 | dsh | **本机样本中没有 compaction 记录**；`request/context` 提供 contextWindow | ✅ `assistant/message.usage`（input / output / cacheRead / cacheWrite） | 部分（turn/end reason） | ✅ 可以从 stream chunk 时间推算 TTFT 和 latency |
 | pi | ❌ 未见 | ✅ input / output / cacheRead / cacheWrite / reasoning（+ cost） | ✅ `stopReason` | ❌ |
+
+## 16. 借鉴 dsh Trajectory（2026-10-20 新增）
+
+来源：`@deepseek-ai/dsh-client-ui-trajectory`（MIT，github.com/deepseek-ai/deepseek-harness `packages/client/ui-trajectory`）。我们**借鉴设计思路**。如果复制代码，按文件保留 MIT 版权声明，并把来源记入 `THIRD_PARTY_NOTICES.md`。样式和组件仍以 openma console 为准，dsh 的组件只在 openma 没有对应物时作参考。
+
+### 16.1 数据模型补充
+
+- **compaction 段**：dsh 的 `compaction/start|summary|end`，以及 `compact-checkpoint` 用户消息（它们出现在 turn 之间），映射为 `segment.boundary`（reason `compaction`），并带上 summary、开始/结束时间和错误。
+- **请求编号**：每个 session 内给 `llm.call` 编号，`attrs.request_index` 从 1 开始，UI 显示为 “Request #N”。compaction 请求单独标 `purpose: "compaction"`。
+- **时序**：
+  - `ttft_ms`：首 token 时间；
+  - `decode_ms`：等于 latency − ttft；
+  - `output_tokens_per_s`：等于 output_tokens / decode 秒数。
+  - 取不到的值记 null。
+- **重试**：`attrs.retry = { attempt, max_attempts, delay_ms, error_code }`，表示第 n 次（共 m 次）。重试本身不新增 llm.call。
+- **provider/model**：每次调用都单独记录，不从 session 继承。
+- **上下文变更事件（first-class）**：
+  - `context.system_prompt`：首次出现或内容 hash 变化时记录，带 hash、长度和可选内容（受 content capture 约束）。
+  - `context.tool_catalog`：工具集合变化时记录，带 hash、新增/移除的工具名和数量。
+  - 两者按 source 能力尽量提供，拿不到就不产生。
+
+### 16.2 UI：三泳道总览
+
+- 在 turn 列表上方放 **Input / Model / Tools 三条泳道**的总览。
+- Model 条内部分两段：TTFT 和 decode，颜色深浅不同。
+- Model 泳道下方画 **context watermark 折线**，在 compaction 处下落。
+- **刷选（brush）**：在总览上拖选一个范围，下方 turn 列表和调用列表按该时间/序号范围过滤。
+- **时长模式切换**：
+  - sequence：等宽，按序号；
+  - actual：实际时长；
+  - compressed：实际时长，但把 idle gap 折叠成固定宽度。
+- **运行中 span**：只画开始标记，不伪造结束。
+- **未知值**：一律显示 “unavailable”（或 “—”），绝不显示 0。
