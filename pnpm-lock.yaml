@@ -18,11 +18,30 @@ importers:
         specifier: ^3.2
         version: 3.2.7(@types/node@24.19.2)
 
+  packages/bus/inproc:
+    dependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@openmatel/contract-tests':
+        specifier: workspace:*
+        version: link:../../contract-tests
+      vitest:
+        specifier: ^3
+        version: 3.2.7(@types/node@24.19.2)
+
   packages/cli:
     devDependencies:
+      '@openmatel/bus-inproc':
+        specifier: workspace:*
+        version: link:../bus/inproc
       '@openmatel/core':
         specifier: workspace:*
         version: link:../core
+      '@openmatel/pipeline':
+        specifier: workspace:*
+        version: link:../pipeline
       '@openmatel/source-local':
         specifier: workspace:*
         version: link:../sources/local
@@ -46,6 +65,19 @@ importers:
         version: 3.2.7(@types/node@24.19.2)
 
   packages/core: {}
+
+  packages/pipeline:
+    dependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@openmatel/bus-inproc':
+        specifier: workspace:*
+        version: link:../bus/inproc
+      vitest:
+        specifier: ^3
+        version: 3.2.7(@types/node@24.19.2)
 
   packages/server:
     dependencies:
