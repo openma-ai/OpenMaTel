@@ -37,11 +37,33 @@ export const SYNTHETIC_TURN_ID = "turn_0";
 /** Fallback segment, for events written before `segment_id` was required. */
 export const DEFAULT_SEGMENT_ID = FIRST_SEGMENT_ID;
 
-/** Kinds that describe the session itself; they are kept on the session, not in a turn. */
+/**
+ * Context snapshots that describe the prompt or the available tools.
+ *
+ * They are not steps: a normalizer emits them without a `step_id`. When one
+ * occurs while a turn is running it carries that `turn_id` and stays in the
+ * turn's `events`; otherwise it is session-level and no synthetic turn is
+ * created for it (design §16.1).
+ */
+export const CONTEXT_LEVEL_KINDS: ReadonlySet<string> = new Set([
+  "context.system_prompt",
+  "context.tool_catalog",
+]);
+
+/**
+ * Kinds that describe the session itself; they are kept on the session, not
+ * in a turn.
+ *
+ * Context snapshots are listed here as well, but unlike the other kinds they
+ * may still belong to a running turn (see {@link CONTEXT_LEVEL_KINDS}). Either
+ * way they never become a step or a turn of their own.
+ */
 export const SESSION_LEVEL_KINDS: ReadonlySet<string> = new Set([
   "session.start",
   "session.end",
   "segment.boundary",
+  "context.system_prompt",
+  "context.tool_catalog",
 ]);
 
 /** Outcome of a whole session. */
@@ -455,7 +477,12 @@ const collect = (events: AgentEvent[]): Collected => {
   for (const event of ordered) {
     // Session-level events never belong to a turn and must not create the
     // synthetic turn. A segment boundary is a node of the segment, not a turn.
-    if (SESSION_LEVEL_KINDS.has(event.kind)) continue;
+    // Context snapshots are the exception when they carry the id of the turn
+    // they occurred in: they stay in that turn's event list as non-steps.
+    const isContext = CONTEXT_LEVEL_KINDS.has(event.kind);
+    if (SESSION_LEVEL_KINDS.has(event.kind) && (!isContext || event.turn_id === undefined)) {
+      continue;
+    }
     const turn = turnOf(event);
     turn.events.push(event);
 

@@ -727,6 +727,8 @@
           "session.end",
           "turn.start",
           "turn.end",
+          "context.system_prompt",
+          "context.tool_catalog",
           "message.user",
           "message.agent",
           "reasoning",

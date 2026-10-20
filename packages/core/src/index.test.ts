@@ -5,9 +5,12 @@ import * as core from "./index.js";
 describe("@openmatel/core", () => {
   it("re-exports the schema", () => {
     expect(core.SCHEMA_VERSION).toBe("oma.agentobs.v1");
-    expect(core.EVENT_KINDS).toHaveLength(28);
+    expect(core.EVENT_KINDS).toHaveLength(30);
     expect(core.EVENT_KINDS).toContain("tool.call");
     expect(core.EVENT_KINDS).toContain("segment.boundary");
+    expect(core.EVENT_KINDS).toContain("context.system_prompt");
+    expect(core.EVENT_KINDS).toContain("context.tool_catalog");
+    expect(core.CONTEXT_CHANGES).toEqual(["initial", "changed"]);
     expect(core.FIRST_SEGMENT_ID).toBe("seg_0");
     expect(core.STEP_STATUSES).toContain("error");
   });

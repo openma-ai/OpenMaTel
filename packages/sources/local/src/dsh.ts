@@ -47,6 +47,7 @@ import {
 } from "@openmatel/core";
 
 import {
+  ContextTracker,
   EventScope,
   SourceEventFactory,
   ToolCallRegistry,
@@ -350,6 +351,8 @@ interface DshState {
   firstTokens: Map<string, number>;
   turnLlmCalls: AgentEvent[];
   compaction?: DshCompaction;
+  /** System prompt and tool catalog snapshots of the session. */
+  context: ContextTracker;
   /** Retry facts by `turn:step`, waiting for the settled call. */
   pendingRetries: Map<string, LlmCallRetry>;
   /** Error codes seen in `assistant/attempt`, by `turn:step`. */
@@ -368,6 +371,7 @@ function createState(file: SessionFile): DshState {
     factory: new SourceEventFactory(file.source, file.sourceSessionId, FORMAT),
     scope: new EventScope(),
     events: [],
+    context: new ContextTracker(),
     segmentIndex: 0,
     segmentId: FIRST_SEGMENT_ID,
     lastContextTokens: null,
@@ -1329,6 +1333,65 @@ function handleSessionTitle(
   refreshTitle(state);
 }
 
+/** Emit a system prompt snapshot when it is new or changed. */
+function emitSystemPrompt(
+  state: DshState,
+  text: string,
+  ts: string,
+  ref: string,
+): void {
+  const observation = state.context.observeSystemPrompt(text);
+  if (observation === undefined) return;
+  state.events.push(
+    createDshEvent(state, {
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: observation.kind,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      content: observation.content,
+      ref,
+    }),
+  );
+}
+
+/** Emit a tool catalog snapshot when it is new or changed. */
+function emitToolCatalog(
+  state: DshState,
+  tools: unknown,
+  ts: string,
+  ref: string,
+): void {
+  if (!Array.isArray(tools)) return;
+  const observation = state.context.observeToolCatalog(tools);
+  if (observation === undefined) return;
+  state.events.push(
+    createDshEvent(state, {
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: observation.kind,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      ref,
+    }),
+  );
+}
+
+/** Handle the `system/message` record: the prompt the runtime sent. */
+function handleSystemMessage(
+  state: DshState,
+  data: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  const message = isPlainObject(data.message) ? data.message : undefined;
+  const text = textFromContent(message?.content);
+  ensureSessionStart(state, ts, ref);
+  emitSystemPrompt(state, text, ts, ref);
+}
+
 /** Handle the `request/context` record. */
 function handleRequestContext(
   state: DshState,
@@ -1371,6 +1434,12 @@ function handleRequestHeader(
   if (model !== undefined) {
     state.model = model;
     if (state.sessionStart) state.sessionStart.attrs.model = model;
+  }
+
+  // dsh writes the full tool list of a request on the header. It is the only
+  // record that exposes the catalog, so a header without it emits nothing.
+  if (header !== undefined) {
+    emitToolCatalog(state, header.tools, ts, ref);
   }
 
   if (asString(data.reason) === "resume" && state.pendingBoundary === undefined) {
@@ -1583,6 +1652,10 @@ function handleRecord(state: DshState, record: RawRecord): void {
     }
     case "session/title": {
       if (payload) handleSessionTitle(state, payload, ts, ref);
+      break;
+    }
+    case "system/message": {
+      if (payload) handleSystemMessage(state, payload, ts, ref);
       break;
     }
     case "request/context": {

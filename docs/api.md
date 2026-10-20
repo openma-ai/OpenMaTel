@@ -170,6 +170,25 @@ Lookup is exact by default. A store that implements the optional
 `getSessionByPrefix(idOrPrefix)` capability opts into id-prefix lookup; all
 other stores return exact matches only. A missing session is `404`.
 
+### Context change events
+
+Two canonical kinds describe the context a model saw, rather than an action
+the agent took. They are not steps: they carry no `step_id`, are never counted
+in `step_count` or `llm_calls`, and do not open a turn. A snapshot that occurs
+between turns is session-level; one that occurs while a turn is running keeps
+that `turn_id` and appears in the turn's `events` list. Normalizers emit them
+only on the first sighting and when the hash changes.
+
+| Kind | `attrs` | Meaning |
+| --- | --- | --- |
+| `context.system_prompt` | `hash` (`sha256-32hex`), `length_chars`, `change` (`initial` \| `changed`) | The system prompt the harness assembled. When the content capture policy allows it, the text is in `content.input.text`. |
+| `context.tool_catalog` | `hash` (`sha256-32hex`), `tool_count`, `added` (string[]), `removed` (string[]), `change` (`initial` \| `changed`) | The set of tools available to the model. `added` and `removed` are the difference to the previous catalog. |
+
+A source that does not record one of these pieces of context emits no event
+for it; the absence of a `context.*` event is not evidence that the context
+was empty. Both kinds are accepted by `GET /v1/query/sessions/{id}/steps` as
+the `kind` filter and by `EventKind` in the OpenAPI schema.
+
 ### `GET /v1/query/sessions/{id}/segments`
 
 Returns the context segments of a session in order. The first segment is
