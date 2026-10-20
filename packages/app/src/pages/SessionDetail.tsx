@@ -41,8 +41,8 @@ import { useTheme } from "@console-shims/lib/theme";
 import { client } from "../client";
 import { isSyntheticModel, toManagedEvents } from "../adapter/to-managed-events";
 import { CacheRatio } from "../components/CacheRatio";
-import { ContextWatermarkChart } from "../components/ContextWatermarkChart";
 import { IdleGapMarker } from "../components/IdleGapMarker";
+import { SessionOverview } from "../components/overview/SessionOverview";
 import { SegmentBoundaryNode } from "../components/SegmentBoundaryNode";
 import { SubagentSteps } from "../components/SubagentSteps";
 import {
@@ -54,6 +54,7 @@ import {
   turnPromptPreview,
 } from "../lib/session-format";
 import {
+  filterTurnGroups,
   groupTurnsBySegment,
   needsSegmentChrome,
   subagentSteps,
@@ -136,6 +137,9 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [view, setView] = useState<View>("turns");
+  const [overviewTurnIds, setOverviewTurnIds] = useState<ReadonlySet<string> | null>(
+    null,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -144,6 +148,7 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
     setSegments([]);
     setTurns([]);
     setCalls([]);
+    setOverviewTurnIds(null);
 
     const load = async (): Promise<void> => {
       const value = await obsClient.getSession(sessionId);
@@ -192,7 +197,19 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
     () => groupTurnsBySegment(segments, turns),
     [segments, turns],
   );
-  const showSegmentChrome = needsSegmentChrome(groups);
+  const visibleGroups = useMemo(
+    () =>
+      overviewTurnIds === null
+        ? groups
+        : filterTurnGroups(groups, overviewTurnIds),
+    [groups, overviewTurnIds],
+  );
+  const visibleTurnCount = visibleGroups.reduce(
+    (total, group) => total + group.turns.length,
+    0,
+  );
+  const showSegmentChrome = needsSegmentChrome(visibleGroups);
+  const filterActive = overviewTurnIds !== null;
 
   const openChildSession = (childSessionId: string): void => {
     navigate(`/sessions/${encodeURIComponent(childSessionId)}`);
@@ -312,7 +329,10 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
         )}
         {view === "turns" && (
           <span className="ml-auto font-mono text-xs text-fg-subtle">
-            {turns.length} turn{turns.length === 1 ? "" : "s"} · {segments.length} segment
+            {filterActive
+              ? `${visibleTurnCount} of ${turns.length}`
+              : turns.length}{" "}
+            turn{turns.length === 1 ? "" : "s"} · {segments.length} segment
             {segments.length === 1 ? "" : "s"}
           </span>
         )}
@@ -322,15 +342,24 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
         {view === "turns" ? (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
             <div className="flex flex-col gap-3 px-3 pb-6 pt-1 sm:px-4">
-              <ContextWatermarkChart points={calls} />
+              <SessionOverview
+                turns={turns}
+                calls={calls}
+                segments={segments}
+                onFilterChange={setOverviewTurnIds}
+              />
 
               {groups.length === 0 ? (
                 <div className="rounded-lg border border-border bg-bg-surface/30 px-4 py-8 text-center text-sm text-fg-muted">
                   This session has no turns.
                 </div>
+              ) : visibleGroups.length === 0 ? (
+                <div className="rounded-lg border border-border bg-bg-surface/30 px-4 py-8 text-center text-sm text-fg-muted">
+                  No turns overlap the brushed range.
+                </div>
               ) : (
                 <div className="flex flex-col gap-3">
-                  {groups.map((group) => (
+                  {visibleGroups.map((group) => (
                     <SegmentSection
                       key={group.segment_id}
                       group={group}

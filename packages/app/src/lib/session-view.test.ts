@@ -22,6 +22,7 @@ import {
   turnPromptPreview,
 } from "./session-format";
 import {
+  filterTurnGroups,
   groupTurnsBySegment,
   idleGapByTurn,
   idleGapsByTurn,
@@ -504,5 +505,30 @@ describe("segment and turn grouping", () => {
         task: null,
       },
     ]);
+  });
+
+  it("filters turn groups to the brushed turn ids", () => {
+    const first = turnView("turn_1", "seg_0", [
+      event("u1", "message.user", "2026-10-20T10:00:00Z"),
+    ]);
+    const second = turnView("turn_2", "seg_0", [
+      event("u2", "message.user", "2026-10-20T10:01:00Z"),
+    ]);
+    const third = turnView("turn_3", "seg_1", [
+      event("u3", "message.user", "2026-10-20T10:02:00Z", {
+        segment_id: "seg_1",
+      }),
+    ]);
+    const groups = groupTurnsBySegment(
+      [segmentView("seg_0"), segmentView("seg_1")],
+      [first, second, third],
+    );
+
+    const filtered = filterTurnGroups(groups, new Set(["turn_2"]));
+    expect(filtered.map((group) => group.segment_id)).toEqual(["seg_0"]);
+    expect(filtered[0]?.turns.map((row) => row.turn.turn_id)).toEqual([
+      "turn_2",
+    ]);
+    expect(filterTurnGroups(groups, new Set())).toEqual([]);
   });
 });

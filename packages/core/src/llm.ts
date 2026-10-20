@@ -53,10 +53,14 @@ export interface LlmCallPoint {
   turn_id: string | null;
   segment_id: string;
   ts: string;
+  /** ISO end timestamp reported by the source, or `null` when unknown. */
+  end_ts: string | null;
   /** 1-based position of the call in its session, in timestamp order. */
   request_index: number;
   /** Whether the call served the conversation or a context compaction. */
   purpose: LlmCallPurpose | null;
+  /** Provider reported for this call, or `null` when the source did not say. */
+  provider: string | null;
   model: string | null;
   context_tokens: number | null;
   /** Change against the previous call in the same segment, or `null`. */
@@ -224,8 +228,10 @@ export function llmCallSeries(events: AgentEvent[], filter: LlmCallFilter = {}):
       turn_id: asString(event.turn_id),
       segment_id,
       ts: event.ts,
+      end_ts: asString(event.end_ts),
       request_index: asPositiveInteger(attrs.request_index) ?? order + 1,
       purpose: asPurpose(attrs.purpose),
+      provider: asString(attrs.provider),
       model: asString(attrs.model),
       context_tokens,
       context_delta,

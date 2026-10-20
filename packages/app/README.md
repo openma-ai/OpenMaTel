@@ -8,12 +8,13 @@ console shell from `@openmatel/oma-console-ui`:
   `DataTable`, `FilterChip`, `FacetedFilter`, `Badge`, `StatusPill` and
   `EmptyState`, fed by `ObsClient`
 - `/sessions/:id` is the console-shaped session detail: breadcrumb + title +
-  chips, then the layered **Turns** view (the default) with segment grouping,
-  each turn's prompt/step/active-time/token/signal summary, per-turn `TimelineView`
-  expansion, and the session context-watermark chart. Conversation and the
-  original full-session Timeline remain one toggle away. `src/adapter/to-managed-events.ts`
-  adapts `oma.agentobs.v1` `AgentEvent`s to the managed event vocabulary; no
-  trace renderer is forked.
+  chips, then the layered **Turns** view (the default) with the three-lane
+  Input/Model/Tools overview (duration modes, context watermark, brush filtering),
+  segment grouping, each turn's prompt/step/active-time/token/signal summary,
+  and per-turn `TimelineView` expansion. Conversation and the original
+  full-session Timeline remain one toggle away.
+  `src/adapter/to-managed-events.ts` adapts `oma.agentobs.v1` `AgentEvent`s to
+  the managed event vocabulary; no trace renderer is forked.
 
 ```sh
 pnpm --filter @openmatel/app build
