@@ -52,6 +52,8 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  laterTimestamp,
+  latestEventTimestamp,
   llmCallAttrs,
   parseJsonlText,
   sessionStartAttrs,
@@ -167,6 +169,8 @@ interface PiState {
   contextWindow?: number;
   /** Boundaries whose `context_tokens_after` waits for the next call. */
   pendingBoundaries: PendingBoundary[];
+  /** Latest timestamp of any record of the file, for the closing events. */
+  latestRecordTs?: string;
 }
 
 interface PendingBoundary {
@@ -681,8 +685,9 @@ function handleRecord(state: PiState, record: RawRecord): void {
   state.scope.begin(line);
 
   const type = asString(data.type) ?? "";
-  const ts =
-    timestampOf(data.timestamp, data.time, data.createdAt) ?? new Date(0).toISOString();
+  const recordTs = timestampOf(data.timestamp, data.time, data.createdAt);
+  const ts = recordTs ?? new Date(0).toISOString();
+  state.latestRecordTs = laterTimestamp(state.latestRecordTs, recordTs);
 
   switch (type) {
     case "session": {
@@ -754,12 +759,20 @@ function handleRecord(state: PiState, record: RawRecord): void {
 
 /** Close the session: the last turn, the open tool calls and the session end. */
 function finalize(state: PiState, file: SessionFile, endLine: number): void {
-  const endTs = new Date(file.mtimeMs > 0 ? file.mtimeMs : 0).toISOString();
+  // The file mtime is not part of the trace: use the latest record timestamp
+  // so a file touched later does not invent an idle gap at the end.
+  const endTs =
+    state.latestRecordTs ??
+    new Date(file.mtimeMs > 0 ? file.mtimeMs : 0).toISOString();
   state.scope.begin(endLine);
 
   if (state.sessionStart === undefined) ensureSessionStart(state, endTs, file.path);
 
-  endTurn(state, endTs, file.path, "end_of_session");
+  const turnEndTs =
+    state.turnOpen && state.turnId !== undefined
+      ? latestEventTimestamp(state.events, state.turnId) ?? endTs
+      : endTs;
+  endTurn(state, turnEndTs, file.path, "end_of_session");
 
   for (const call of state.toolCalls.all()) {
     if (call.resolved) continue;

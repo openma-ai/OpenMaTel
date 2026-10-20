@@ -24,6 +24,9 @@ import {
 import {
   groupTurnsBySegment,
   idleGapByTurn,
+  idleGapsByTurn,
+  idleGapsWithinTurn,
+  internalIdleGapsByTurn,
   needsSegmentChrome,
   parseSegmentBoundary,
   subagentSteps,
@@ -254,6 +257,69 @@ describe("segment and turn grouping", () => {
       }),
     ]);
     expect(idleGapByTurn([first, second]).size).toBe(0);
+  });
+
+  it("keeps the between-turn gap even when the previous turn ends with turn.end", () => {
+    const first = turnView("turn_1", "seg_0", [
+      event("g1", "turn.start", "2026-10-20T10:00:00Z", { turn_id: "turn_1" }),
+      event("g2", "turn.end", "2026-10-20T10:00:01Z", { turn_id: "turn_1" }),
+    ]);
+    const second = turnView("turn_2", "seg_0", [
+      event("g3", "turn.start", "2026-10-20T11:00:00Z", { turn_id: "turn_2" }),
+    ]);
+    const gaps = idleGapByTurn([first, second]);
+    expect(gaps.get("turn_2")?.duration_ms).toBe(59 * 60 * 1000 + 59 * 1000);
+    expect(gaps.has("turn_1")).toBe(false);
+  });
+
+  it("finds the idle gaps inside one turn, not the closure of its trace", () => {
+    const turn = turnView("turn_1", "seg_0", [
+      event("i1", "message.user", "2026-10-20T10:00:00Z", {
+        turn_id: "turn_1",
+        end_ts: "2026-10-20T10:00:01Z",
+      }),
+      event("i2", "tool.call", "2026-10-20T12:00:01Z", { turn_id: "turn_1" }),
+      event("i3", "message.agent", "2026-10-20T12:00:02Z", { turn_id: "turn_1" }),
+      // Four hours between the last real event and the synthetic turn end:
+      // that is bookkeeping, not an idle gap of the turn.
+      event("i4", "turn.end", "2026-10-20T16:00:02Z", { turn_id: "turn_1" }),
+    ]);
+
+    const gaps = idleGapsWithinTurn(turn);
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatchObject({
+      after_event_id: "i1",
+      before_event_id: "i2",
+      start: "2026-10-20T10:00:01.000Z",
+      end: "2026-10-20T12:00:01.000Z",
+      duration_ms: 2 * 60 * 60 * 1000,
+    });
+    expect(internalIdleGapsByTurn([turn]).get("turn_1")).toEqual(gaps);
+    expect(idleGapsByTurn([turn]).get("turn_1")).toEqual(gaps);
+    // The old helper still only reports gaps *between* turns.
+    expect(idleGapByTurn([turn])).toEqual(new Map());
+  });
+
+  it("drops internal gaps adjacent to session.end bookkeeping too", () => {
+    const turn = turnView("turn_1", "seg_0", [
+      event("j1", "llm.call", "2026-10-20T10:00:00Z", { turn_id: "turn_1" }),
+      event("j2", "session.end", "2026-10-20T12:00:00Z"),
+    ]);
+    expect(idleGapsWithinTurn(turn)).toEqual([]);
+  });
+
+  it("puts internal gaps on the turn row, without a preceding-turn divider", () => {
+    const turn = turnView("turn_1", "seg_0", [
+      event("k1", "turn.start", "2026-10-20T10:00:00Z", { turn_id: "turn_1" }),
+      event("k2", "permission.request", "2026-10-20T12:00:00Z", {
+        turn_id: "turn_1",
+      }),
+    ]);
+    const groups = groupTurnsBySegment([segmentView("seg_0")], [turn]);
+    const row = groups[0]?.turns[0];
+    expect(row?.idle_gap).toBeNull();
+    expect(row?.internal_idle_gaps).toHaveLength(1);
+    expect(row?.idle_gaps).toEqual(row?.internal_idle_gaps);
   });
 
   it("normalises segment boundary attrs without inventing numbers", () => {

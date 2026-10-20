@@ -51,6 +51,8 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  laterTimestamp,
+  latestEventTimestamp,
   llmCallAttrs,
   parseJsonlText,
   planEntriesFrom,
@@ -202,6 +204,8 @@ interface ClaudeState {
   resumeLeaf?: string;
   /** Whether a real user/assistant/system record has been seen. */
   sawConversation: boolean;
+  /** Latest timestamp of any record of the file, for the closing events. */
+  latestRecordTs?: string;
 }
 
 /** Create the state for one session file. */
@@ -980,8 +984,9 @@ function handleRecord(state: ClaudeState, record: RawRecord): void {
   state.scope.begin(line);
 
   const type = asString(data.type) ?? "";
-  const ts =
-    timestampOf(data.timestamp, data.createdAt) ?? new Date(0).toISOString();
+  const recordTs = timestampOf(data.timestamp, data.createdAt);
+  const ts = recordTs ?? new Date(0).toISOString();
+  state.latestRecordTs = laterTimestamp(state.latestRecordTs, recordTs);
 
   const isSidechain = asBoolean(data.isSidechain) === true;
   maybeOpenResumeBoundary(state, data, ts, ref, isSidechain);
@@ -1075,7 +1080,11 @@ function handleRecord(state: ClaudeState, record: RawRecord): void {
 function finalize(state: ClaudeState, file: SessionFile, endLine: number): void {
   // Events that belong to the file as a whole are placed one line past the
   // last record, so their ids cannot collide with the events of a record.
-  const endTs = new Date(file.mtimeMs > 0 ? file.mtimeMs : 0).toISOString();
+  // The file mtime is not part of the trace: a file touched later must not
+  // invent an idle gap at the end of the session.
+  const endTs =
+    state.latestRecordTs ??
+    new Date(file.mtimeMs > 0 ? file.mtimeMs : 0).toISOString();
   state.scope.begin(endLine);
 
   // A session that never had a message still has a start.
@@ -1083,9 +1092,14 @@ function finalize(state: ClaudeState, file: SessionFile, endLine: number): void 
     ensureSessionStart(state, {}, endTs, file.path);
   }
 
-  // Close the running turn. The scope keeps counting, so the id of this
-  // event cannot collide with the events of the last record.
-  endTurn(state, endTs, "end_of_session", file.path);
+  // Close the running turn at its last event, not at the file mtime. The
+  // scope keeps counting, so the id of this event cannot collide with the
+  // events of the last record.
+  const turnEndTs =
+    state.turnOpen && state.turnId !== undefined
+      ? latestEventTimestamp(state.events, state.turnId) ?? endTs
+      : endTs;
+  endTurn(state, turnEndTs, "end_of_session", file.path);
 
   // Tool calls without a result keep their call time and no output.
   for (const call of state.toolCalls.all()) {

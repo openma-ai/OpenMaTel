@@ -303,6 +303,41 @@ export function timestampOf(...candidates: unknown[]): string | undefined {
   return undefined;
 }
 
+/** The later of two ISO timestamps, ignoring values that cannot be parsed. */
+export function laterTimestamp(
+  current: string | undefined,
+  candidate: string | undefined,
+): string | undefined {
+  if (candidate === undefined) return current;
+  if (current === undefined) return candidate;
+
+  const currentMs = Date.parse(current);
+  const candidateMs = Date.parse(candidate);
+  if (Number.isNaN(currentMs)) return Number.isNaN(candidateMs) ? current : candidate;
+  if (Number.isNaN(candidateMs)) return current;
+  return candidateMs > currentMs ? candidate : current;
+}
+
+/**
+ * The latest timestamp of a list of events.
+ *
+ * A record's `end_ts` is the completion of the event, so it counts as a later
+ * activity than the event's `ts`. Passing a turn id restricts the result to
+ * the events of that turn.
+ */
+export function latestEventTimestamp(
+  events: readonly AgentEvent[],
+  turnId?: string,
+): string | undefined {
+  let latest: string | undefined;
+  for (const event of events) {
+    if (turnId !== undefined && event.turn_id !== turnId) continue;
+    latest = laterTimestamp(latest, event.ts);
+    if (event.end_ts !== undefined) latest = laterTimestamp(latest, event.end_ts);
+  }
+  return latest;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Content                                                                     */
 /* -------------------------------------------------------------------------- */
