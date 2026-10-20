@@ -1,15 +1,29 @@
-import { startTransition, useEffect, useMemo, useState } from "react";
+import {
+  Fragment,
+  startTransition,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useNavigate, useParams } from "react-router";
 
+import { llmCallSeries } from "@openmatel/core/llm";
+import { segmentViews, turnViews } from "@openmatel/core/tree";
+import type {
+  LlmCallPoint,
+  SegmentView,
+  SessionStatus,
+  TurnView,
+} from "@openmatel/core";
 import {
   projectCanonicalChatTurns,
   type CanonicalChatTurn,
 } from "@openma/common/session-events/managed";
-import type { SessionStatus } from "@openmatel/core";
 import {
   ObsProvider,
   durationBetween,
   formatCoverage,
+  formatDurationMs,
   formatTokens,
   useObs,
   type ObsSessionDetail,
@@ -17,7 +31,7 @@ import {
 
 import { Badge, StatusPill, type StatusTone } from "@/components/Badge";
 import { BrandLoader } from "@/components/BrandLoader";
-import { ClockIcon, DurationIcon } from "@/components/icons";
+import { ChevronDownIcon, ClockIcon, DurationIcon } from "@/components/icons";
 import { ManagedSessionConversation } from "@/components/session/ManagedSessionConversation";
 import { TimelineView } from "@/components/timeline/TimelineView";
 import { Button } from "@/components/ui/button";
@@ -26,8 +40,27 @@ import { useTheme } from "@console-shims/lib/theme";
 
 import { client } from "../client";
 import { isSyntheticModel, toManagedEvents } from "../adapter/to-managed-events";
+import { CacheRatio } from "../components/CacheRatio";
+import { ContextWatermarkChart } from "../components/ContextWatermarkChart";
+import { IdleGapMarker } from "../components/IdleGapMarker";
+import { SegmentBoundaryNode } from "../components/SegmentBoundaryNode";
+import { SubagentSteps } from "../components/SubagentSteps";
+import {
+  EM_DASH,
+  formatCount,
+  formatSignalLabel,
+  formatSignalTitle,
+  turnPromptPreview,
+} from "../lib/session-format";
+import {
+  groupTurnsBySegment,
+  needsSegmentChrome,
+  subagentSteps,
+  type SegmentGroup,
+  type TurnRow,
+} from "../lib/session-view";
 
-type View = "conversation" | "timeline";
+type View = "turns" | "conversation" | "timeline";
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -49,9 +82,9 @@ const toneFor = (status: SessionStatus): StatusTone => {
 };
 
 const relativeTo = (iso: string | null): string => {
-  if (iso === null) return "—";
+  if (iso === null) return EM_DASH;
   const timestamp = Date.parse(iso);
-  if (Number.isNaN(timestamp)) return "—";
+  if (Number.isNaN(timestamp)) return EM_DASH;
   return formatRelative(Date.now() - timestamp);
 };
 
@@ -62,9 +95,12 @@ const absolute = (iso: string | null): string | undefined => {
 };
 
 /**
- * Session detail, mirroring the OpenMA console's `pages/SessionDetail.tsx`
- * header/tabs/right-panel layout while feeding the vendored, unmodified
- * `TimelineView` and `ManagedSessionConversation` with adapted events.
+ * Session detail with the layered segment → turn view as the default.
+ *
+ * The header, tabs and conversation/timeline surfaces stay identical to the
+ * vendored console. `getSegments`, `getTurns` and `getLlmCalls` provide the
+ * layered rows and the context series; the local core projections are a
+ * fallback when an older Query implementation does not expose them.
  */
 export function SessionDetailPage() {
   const { id } = useParams();
@@ -92,21 +128,41 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
   const navigate = useNavigate();
 
   const [detail, setDetail] = useState<ObsSessionDetail | null>(null);
+  const [segments, setSegments] = useState<SegmentView[]>([]);
+  const [turns, setTurns] = useState<TurnView[]>([]);
+  const [calls, setCalls] = useState<LlmCallPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const [view, setView] = useState<View>("timeline");
+  const [view, setView] = useState<View>("turns");
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setSegments([]);
+    setTurns([]);
+    setCalls([]);
 
-    obsClient
-      .getSession(sessionId)
-      .then((value) => {
-        if (!cancelled) setDetail(value);
-      })
+    const load = async (): Promise<void> => {
+      const value = await obsClient.getSession(sessionId);
+      if (cancelled) return;
+      setDetail(value);
+
+      const events = value.turns.flatMap((turn) => turn.events);
+      const [segmentPage, turnPage, callPage] = await Promise.all([
+        obsClient.getSegments(sessionId).catch(() => null),
+        obsClient.getTurns(sessionId).catch(() => null),
+        obsClient.getLlmCalls(sessionId).catch(() => null),
+      ]);
+      if (cancelled) return;
+
+      setSegments(segmentPage?.items ?? segmentViews(events));
+      setTurns(turnPage?.items ?? turnViews(events));
+      setCalls(callPage?.items ?? llmCallSeries(events));
+    };
+
+    load()
       .catch((cause: unknown) => {
         if (cancelled) return;
         setDetail(null);
@@ -126,10 +182,20 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
     [detail],
   );
 
-  const turns = useMemo<CanonicalChatTurn[]>(
+  const chatTurns = useMemo<CanonicalChatTurn[]>(
     () => projectCanonicalChatTurns(events),
     [events],
   );
+
+  const groups = useMemo(
+    () => groupTurnsBySegment(segments, turns),
+    [segments, turns],
+  );
+  const showSegmentChrome = needsSegmentChrome(groups);
+
+  const openChildSession = (childSessionId: string): void => {
+    navigate(`/sessions/${encodeURIComponent(childSessionId)}`);
+  };
 
   if (loading && detail === null) {
     return (
@@ -166,9 +232,8 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Header: title + the console's badge strip. Everything below wraps;
-          time values are short (formatRelative/formatDuration) and carry the
-          exact timestamp in the tooltip instead of being sliced. */}
+      {/* Header: title + the console's badge strip. Tokens in is the full
+          context size (input + cache read + cache write), not raw input. */}
       <div className="flex shrink-0 flex-col gap-2 py-3 pl-3 pr-4">
         <div className="flex min-h-8 min-w-0 items-center gap-2">
           <h2 className="min-w-0 truncate text-sm font-medium text-fg" title={summary.session_id}>
@@ -178,15 +243,15 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
 
         <div className="flex flex-wrap items-center gap-2">
           <StatusPill status={status} label={summary.status} />
-          <Badge label={summary.source ?? "—"} title="Source" />
+          <Badge label={summary.source ?? EM_DASH} title="Source" />
           {summary.harness !== null && summary.harness !== summary.source && (
             <Badge label={summary.harness} title="Harness" />
           )}
-          <Badge label={model ?? "—"} title="Model" />
-          <Badge label={summary.cwd ?? "—"} title={summary.cwd ?? "Working directory"} />
+          <Badge label={model ?? EM_DASH} title="Model" />
+          <Badge label={summary.cwd ?? EM_DASH} title={summary.cwd ?? "Working directory"} />
           <Badge
             icon={<DurationIcon />}
-            label={duration === null ? "—" : formatDuration(duration)}
+            label={duration === null ? EM_DASH : formatDuration(duration)}
             title="Wall-clock duration of the session"
           />
           <Badge
@@ -202,22 +267,39 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
             />
           )}
           <Badge
-            label={`${summary.tool_error_count} tool error${summary.tool_error_count === 1 ? "" : "s"}`}
-            title={`${summary.tool_error_count} of ${summary.tool_call_count} tool calls failed`}
+            label={`${formatCount(summary.tool_error_count)} tool error${
+              summary.tool_error_count === 1 ? "" : "s"
+            }`}
+            title={`${formatCount(summary.tool_error_count)} of ${formatCount(
+              summary.tool_call_count,
+            )} tool calls failed`}
           />
           <Badge
-            label={`tokens ${formatTokens(summary.tokens_in)}↓ ${formatTokens(usage.total.output_tokens)}↑ · ${formatCoverage(usage.coverage)}`}
-            title={`${usage.covered} of ${usage.calls} model calls reported usage; tokens in is the full context (including cache)`}
+            label={`tokens in ${formatTokens(summary.tokens_in)} · out ${formatTokens(
+              usage.total.output_tokens,
+            )} · ${formatCoverage(usage.coverage)}`}
+            title={`tokens in is the sum of context_tokens (input + cache read + cache write); ${usage.covered} of ${usage.calls} model calls reported usage`}
+          />
+          <CacheRatio ratio={summary.cache_hit_ratio} />
+          <Badge
+            label={`peak context ${formatTokens(summary.context_tokens_peak)}`}
+            title="Largest context_tokens of any model call in the session"
           />
         </div>
       </div>
 
-      {/* View tabs — same controls and active treatment as the console. */}
+      {/* View tabs — same controls and active treatment as the console. Turns
+          is the default; Timeline keeps the original full-session waterfall. */}
       <div role="tablist" aria-label="Session view" className="flex shrink-0 items-center gap-1 pl-3 pr-4">
+        <ViewTab
+          label="Turns"
+          active={view === "turns"}
+          onClick={() => startTransition(() => setView("turns"))}
+        />
         <ViewTab
           label="Conversation"
           active={view === "conversation"}
-          onClick={() => setView("conversation")}
+          onClick={() => startTransition(() => setView("conversation"))}
         />
         <ViewTab
           label="Timeline"
@@ -227,24 +309,229 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
         {view === "timeline" && (
           <span className="ml-auto font-mono text-xs text-fg-subtle">{events.length} events</span>
         )}
+        {view === "turns" && (
+          <span className="ml-auto font-mono text-xs text-fg-subtle">
+            {turns.length} turn{turns.length === 1 ? "" : "s"} · {segments.length} segment
+            {segments.length === 1 ? "" : "s"}
+          </span>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
-          {view === "conversation" ? (
+        {view === "turns" ? (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+            <div className="flex flex-col gap-3 px-3 pb-6 pt-1 sm:px-4">
+              <ContextWatermarkChart points={calls} />
+
+              {groups.length === 0 ? (
+                <div className="rounded-lg border border-border bg-bg-surface/30 px-4 py-8 text-center text-sm text-fg-muted">
+                  This session has no turns.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {groups.map((group) => (
+                    <SegmentSection
+                      key={group.segment_id}
+                      group={group}
+                      showChrome={showSegmentChrome}
+                      onOpenChild={openChildSession}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : view === "conversation" ? (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <ManagedSessionConversation
               empty={
                 <p className="text-sm text-fg-muted">This session has no conversation events.</p>
               }
               composer={null}
               sessionId={sessionId}
-              turns={turns}
+              turns={chatTurns}
             />
-          ) : (
+          </div>
+        ) : (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <TimelineView key={sessionId} events={events} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** One context segment: collapsible when the session has more than one. */
+function SegmentSection({
+  group,
+  showChrome,
+  onOpenChild,
+}: {
+  group: SegmentGroup;
+  showChrome: boolean;
+  onOpenChild: (childSessionId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const segment = group.segment;
+  const turnCount = segment?.turn_count ?? group.turns.length;
+
+  const rows = (
+    <>
+      {group.turns.map((row, index) => (
+        <Fragment key={row.turn.turn_id}>
+          {row.idle_gap !== null && index > 0 && (
+            <IdleGapMarker gap={row.idle_gap} />
+          )}
+          <TurnRowComponent row={row} onOpenChild={onOpenChild} />
+        </Fragment>
+      ))}
+    </>
+  );
+
+  if (!showChrome) {
+    return <div className="flex flex-col gap-2">{rows}</div>;
+  }
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-border bg-bg-surface/20">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border/60 px-2 py-1.5">
+        <Button
+          variant="ghost"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className="min-h-11 rounded px-1.5 py-1 font-mono text-xs text-fg-muted hover:bg-bg-surface sm:min-h-0"
+          title={expanded ? "Collapse segment" : "Expand segment"}
+        >
+          <ChevronDownIcon
+            className={`h-3 w-3 transition-transform ${expanded ? "" : "-rotate-90"}`}
+          />
+          {group.segment_id}
+        </Button>
+        <span className="font-mono text-xs text-fg-subtle">
+          {formatCount(turnCount)} turn{turnCount === 1 ? "" : "s"}
+        </span>
+        <Badge
+          label={`tokens in ${formatTokens(segment?.tokens_in)}`}
+          title="Segment context tokens (input + cache read + cache write)"
+        />
+        <Badge
+          label={`peak context ${formatTokens(segment?.context_tokens_peak)}`}
+          title="Largest context_tokens of any model call in this segment"
+        />
+        <CacheRatio ratio={segment?.cache_hit_ratio ?? null} />
+      </div>
+
+      {expanded && (
+        <div className="flex flex-col gap-2 p-2">
+          {segment !== null && segment.boundary !== undefined && (
+            <SegmentBoundaryNode boundary={segment.boundary} />
+          )}
+          {group.turns.length === 0 ? (
+            <p className="px-1 py-2 text-xs text-fg-muted">This segment has no turns.</p>
+          ) : (
+            rows
           )}
         </div>
-      </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * One turn row. Collapsed, it carries the prompt preview, step count, active
+ * duration, context/output tokens and signals. Expanded, it mounts the
+ * vendored `TimelineView` with *only* this turn's adapted events.
+ */
+function TurnRowComponent({
+  row,
+  onOpenChild,
+}: {
+  row: TurnRow;
+  onOpenChild: (childSessionId: string) => void;
+}) {
+  const { turn } = row;
+  const [expanded, setExpanded] = useState(false);
+  const turnEvents = useMemo(
+    () => toManagedEvents({ turns: [{ events: turn.events }] }),
+    [turn.events],
+  );
+  const subagents = useMemo(() => subagentSteps(turn), [turn]);
+  const signals = turn.signals.length > 0 ? turn.signals : turn.summary.signals;
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-bg-surface/30">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        className="flex w-full items-start gap-2 px-3 py-2 text-left transition-colors hover:bg-bg-surface/50"
+        title={turn.prompt ?? undefined}
+      >
+        <span className="mt-0.5 w-3 shrink-0 font-mono text-xs text-fg-subtle">
+          {expanded ? "▾" : "▸"}
+        </span>
+
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg">
+            {turnPromptPreview(turn.prompt)}
+          </span>
+          <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-xs text-fg-subtle">
+            <span title="Turn id">{turn.turn_id}</span>
+            <span aria-hidden="true">·</span>
+            <span title="Reason the turn stopped">{turn.stop_reason ?? EM_DASH}</span>
+            {turn.status !== undefined && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span title="Turn status">{turn.status}</span>
+              </>
+            )}
+          </span>
+        </span>
+
+        <span className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
+          <Badge label={`${formatCount(turn.step_count)} steps`} title="Steps in this turn" />
+          <Badge
+            icon={<DurationIcon />}
+            label={`active ${formatDurationMs(turn.active_ms)}`}
+            title="Active duration excludes idle gaps longer than 30 minutes"
+          />
+          <Badge
+            label={`tokens in ${formatTokens(turn.tokens_in)}`}
+            title="Sum of context_tokens over this turn's model calls (input + cache read + cache write)"
+          />
+          <Badge
+            label={`out ${formatTokens(turn.output_tokens)}`}
+            title="Output tokens reported by this turn's model calls"
+          />
+          {signals.map((signal) => (
+            <Badge
+              key={`${turn.turn_id}:${signal.kind}`}
+              label={<span className="text-warning">{formatSignalLabel(signal)}</span>}
+              title={formatSignalTitle(signal)}
+            />
+          ))}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-border/60">
+          <SubagentSteps steps={subagents} onOpen={onOpenChild} />
+          <div className="flex h-[26rem] min-h-0 flex-col">
+            <div className="flex shrink-0 items-center gap-2 px-3 py-1 font-mono text-xs text-fg-subtle">
+              <span>turn timeline</span>
+              <span aria-hidden="true">·</span>
+              <span>{turnEvents.length} events</span>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <TimelineView
+                key={`${turn.turn_id}:${turnEvents.length}`}
+                events={turnEvents}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
