@@ -1,4 +1,12 @@
-import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +17,7 @@ import type { AgentEvent } from "@openmatel/core";
 
 import {
   createMemoryIO,
+  createWatchIO,
   formatTokens,
   openStore,
   resolveUiDir,
@@ -16,6 +25,7 @@ import {
   runSessions,
   runShow,
   runSources,
+  startIndexWatch,
   startServe,
   type IndexResult,
   type SourceIndexStats,
@@ -297,6 +307,88 @@ describe("openmatel serve", () => {
       expect(anonymous.headers.get("www-authenticate")).toBe("Bearer");
     } finally {
       await handle.close();
+    }
+  });
+});
+
+describe("openmatel serve watch", () => {
+  it("re-indexes an appended session file in one pass without duplicates", async () => {
+    const home = tempDirectory();
+    const projectDir = path.join(home, ".claude", "projects", "-home-user-project");
+    mkdirSync(projectDir, { recursive: true });
+    const sessionFile = path.join(
+      projectDir,
+      "11111111-1111-4111-8111-111111111111.jsonl",
+    );
+    cpSync(
+      path.join(
+        fixturesRoot,
+        "claude-code",
+        "-home-user-project",
+        "11111111-1111-4111-8111-111111111111.jsonl",
+      ),
+      sessionFile,
+    );
+    const dataDir = tempDirectory();
+    const indexOptions = {
+      home,
+      dataDir,
+      sources: ["claude-code"] as const,
+    };
+
+    await runIndex(indexOptions, createMemoryIO());
+
+    const firstStore = await openStore(dataDir);
+    let sessionId: string;
+    let beforeIds: string[];
+    try {
+      const page = await firstStore.query.listSessions({ limit: 10 });
+      expect(page.items).toHaveLength(1);
+      sessionId = page.items[0].session_id;
+      const detail = await firstStore.query.getSession(sessionId);
+      if (detail === null) throw new Error("the indexed session was not found");
+      beforeIds = detail.events.map((event) => event.event_id);
+    } finally {
+      await firstStore.close();
+    }
+
+    appendFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        parentUuid: null,
+        isSidechain: false,
+        type: "user",
+        message: { role: "user", content: "appended while serving" },
+        uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        timestamp: "2026-10-18T13:04:00.000Z",
+        cwd: "/home/user/project",
+        sessionId: "f791eed0-d4d2-4bbf-b8e5-60f35047c6d1",
+      })}\n`,
+      "utf8",
+    );
+
+    const watchIO = createWatchIO(createMemoryIO());
+    const watcher = startIndexWatch({
+      intervalMs: 0,
+      run: () => runIndex(indexOptions, watchIO),
+    });
+    try {
+      await watcher.runOnce();
+    } finally {
+      await watcher.stop();
+    }
+
+    const secondStore = await openStore(dataDir);
+    try {
+      const detail = await secondStore.query.getSession(sessionId);
+      if (detail === null) throw new Error("the re-indexed session was not found");
+      const afterIds = detail.events.map((event) => event.event_id);
+
+      expect(afterIds.length).toBeGreaterThan(beforeIds.length);
+      expect(new Set(afterIds).size).toBe(afterIds.length);
+      for (const id of beforeIds) expect(afterIds).toContain(id);
+    } finally {
+      await secondStore.close();
     }
   });
 });

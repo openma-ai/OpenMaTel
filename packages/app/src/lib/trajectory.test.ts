@@ -165,6 +165,22 @@ describe("ledger row layout", () => {
       shouldFollowTail({ status: "unknown", atBottom: true, rowsGrew: false }),
     ).toBe(true);
     expect(
+      shouldFollowTail({
+        status: "ok",
+        endedAt: new Date().toISOString(),
+        atBottom: true,
+        rowsGrew: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldFollowTail({
+        status: "ok",
+        endedAt: "2020-01-01T00:00:00.000Z",
+        atBottom: true,
+        rowsGrew: false,
+      }),
+    ).toBe(false);
+    expect(
       shouldFollowTail({ status: "ok", atBottom: true, rowsGrew: true }),
     ).toBe(true);
     expect(

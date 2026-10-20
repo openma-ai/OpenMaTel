@@ -22,6 +22,7 @@ import {
   type LedgerRowKind,
   type LedgerTimeRange,
 } from "./ledger";
+import { looksLive } from "./live";
 
 export {
   timeRangeForRange,
@@ -262,6 +263,10 @@ export function isNearBottom(
 export interface FollowTailInput {
   /** Session status, or `null` while it is still being loaded. */
   status: string | null | undefined;
+  /** Timestamp of the last event (`summary.ended_at`). */
+  endedAt?: string | null;
+  /** Current epoch milliseconds; injectable for tests. */
+  now?: number;
   /** `true` when the ledger is currently pinned at the bottom. */
   atBottom: boolean;
   /** `true` when a refresh added rows since the previous render. */
@@ -270,15 +275,18 @@ export interface FollowTailInput {
 
 /**
  * Keep a live session pinned to the bottom when the reader is already there.
- * An unknown status follows too; a finished session only follows on reload.
+ * A growing ledger always follows; a session that did not grow still follows
+ * while it looks live (running/unknown, or a recent last event). A finished
+ * session does not move the reader's position on an unrelated refresh.
  */
 export function shouldFollowTail(input: FollowTailInput): boolean {
   if (!input.atBottom) return false;
-  return (
-    input.rowsGrew ||
-    input.status === "running" ||
-    input.status === "unknown"
-  );
+  if (input.rowsGrew) return true;
+  return looksLive({
+    status: input.status,
+    endedAt: input.endedAt ?? null,
+    now: input.now,
+  });
 }
 
 /** Normalised `0..1` range covered by a slice of ledger rows. */

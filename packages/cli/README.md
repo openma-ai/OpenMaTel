@@ -19,7 +19,7 @@ and skips dsh instead of failing.
 npx openmatel
 # = index, then serve the web UI and open the browser
 
-npx openmatel serve [--port 4319] [--host 127.0.0.1] [--no-open] [--no-index]
+npx openmatel serve [--port 4319] [--host 127.0.0.1] [--no-open] [--no-index] [--watch-interval MS]
 npx openmatel index [--sources claude-code,codex,dsh,pi] [--home DIR] [--data DIR]
 npx openmatel sessions [--source S] [--errors] [--q TEXT] [--limit N] [--json]
 npx openmatel show <session-id-prefix> [--json]
@@ -35,6 +35,14 @@ authenticated without putting the token in the browser history. If the port is
 busy, the next ten ports are tried. `--no-index` serves the existing database
 without scanning local files first. Ctrl-C shuts the listener and the SQLite
 store down cleanly.
+
+Unless `--no-index` is given, `serve` also re-indexes while it runs: every three
+seconds it discovers the local session files again and re-reads only the files
+whose size or mtime changed. `--watch-interval <ms>` changes that delay;
+`--watch-interval 0` disables periodic re-indexing (and so does `--no-index`).
+A watcher pass never overlaps the previous one, and an indexing error is
+reported once without stopping the server. This is what lets the session detail
+page's live poll see events appended to a file after startup.
 
 The web UI is the built `@openmatel/app` SPA, copied to `dist/ui` during the
 CLI build and served from a path relative to the bundled

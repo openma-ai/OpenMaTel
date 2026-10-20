@@ -59,4 +59,11 @@ export {
 } from "./format.js";
 export { createMemoryIO, processIO, type CommandIO } from "./io.js";
 export { databasePath, openStore } from "./store.js";
+export {
+  createWatchIO,
+  DEFAULT_WATCH_INTERVAL_MS,
+  startIndexWatch,
+  type IndexWatchHandle,
+  type IndexWatchOptions,
+} from "./watch.js";
 export { VERSION } from "./version.js";
