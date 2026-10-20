@@ -22,6 +22,7 @@
  *   without content.
  */
 
+import { createHash } from "node:crypto";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -338,6 +339,166 @@ export function latestEventTimestamp(
     if (event.end_ts !== undefined) latest = laterTimestamp(latest, event.end_ts);
   }
   return latest;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Context snapshots                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `sha256-32hex` hash of a context payload.
+ *
+ * The event schema stores only the first 32 hex characters of the SHA-256
+ * digest, so two prompt snapshots can be compared without keeping the text
+ * (design §16.1). The hash is over the UTF-8 text exactly as it was read.
+ */
+export function contextHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * The names of a tool catalog, de-duplicated and sorted.
+ *
+ * Harnesses record tools as an array of names or as an array of objects with
+ * a `name` (and occasionally a `tool_name`) field. Unknown entries are
+ * ignored; the returned order is canonical so the hash of the same set is the
+ * same whatever order the source wrote it in.
+ */
+export function toolNamesFromCatalog(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      if (entry !== "") names.push(entry);
+      continue;
+    }
+    if (!isPlainObject(entry)) continue;
+    const name = asString(entry.name) ?? asString(entry.tool_name);
+    if (name !== undefined && name !== "") names.push(name);
+  }
+  return [...new Set(names)].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+/**
+ * Join the sections of a system message in a deterministic order.
+ *
+ * pi records the prompt as named sections instead of one text block. Known
+ * sections keep the order the harness assembles them in; any extra section is
+ * appended in the order it appears, so a re-read of the same record hashes the
+ * same.
+ */
+export function systemPromptTextFromSections(sections: unknown): string | undefined {
+  if (!isPlainObject(sections)) return undefined;
+
+  const preferred = ["preamble", "tools", "rules", "docs", "cwd"];
+  const keys = [
+    ...preferred.filter((key) => Object.prototype.hasOwnProperty.call(sections, key)),
+    ...Object.keys(sections).filter((key) => !preferred.includes(key)),
+  ];
+
+  const parts: string[] = [];
+  for (const key of keys) {
+    const text = asString(sections[key]);
+    if (text !== undefined && text !== "") parts.push(text);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+/** A `context.system_prompt` snapshot that differs from the previous one. */
+export interface SystemPromptObservation {
+  kind: "context.system_prompt";
+  attrs: Record<string, unknown>;
+  content: EventContent;
+}
+
+/** A `context.tool_catalog` snapshot that differs from the previous one. */
+export interface ToolCatalogObservation {
+  kind: "context.tool_catalog";
+  attrs: Record<string, unknown>;
+}
+
+/**
+ * Tracks the context snapshots of one session.
+ *
+ * A normalizer feeds every system prompt and tool catalog it finds into this
+ * tracker; the tracker returns an observation only on the first sighting and
+ * when the hash changes. It is deliberately stateful and per-session: the
+ * same prompt repeated in later records must not be emitted again.
+ */
+export class ContextTracker {
+  private systemHash: string | undefined;
+  private toolHash: string | undefined;
+  private toolNames: string[] = [];
+
+  /** Whether a system prompt has been observed yet. */
+  hasSystemPrompt(): boolean {
+    return this.systemHash !== undefined;
+  }
+
+  /** Whether a tool catalog has been observed yet. */
+  hasToolCatalog(): boolean {
+    return this.toolHash !== undefined;
+  }
+
+  /** The current catalog, sorted; empty before the first observation. */
+  currentToolNames(): string[] {
+    return [...this.toolNames];
+  }
+
+  /**
+   * Observe a system prompt.
+   *
+   * Returns `undefined` when the prompt is empty (there is nothing to record)
+   * or when its hash is unchanged.
+   */
+  observeSystemPrompt(text: string): SystemPromptObservation | undefined {
+    if (text === "") return undefined;
+
+    const hash = contextHash(text);
+    if (hash === this.systemHash) return undefined;
+
+    const change = this.systemHash === undefined ? "initial" : "changed";
+    this.systemHash = hash;
+
+    return {
+      kind: "context.system_prompt",
+      attrs: { hash, length_chars: text.length, change },
+      content: { input: { text }, capture: "full" },
+    };
+  }
+
+  /**
+   * Observe a tool catalog.
+   *
+   * `value` is the raw list the source wrote; only its names are part of the
+   * canonical catalog. Returns `undefined` when the set of names is unchanged.
+   */
+  observeToolCatalog(value: unknown): ToolCatalogObservation | undefined {
+    const names = toolNamesFromCatalog(value);
+    const hash = contextHash(names.join("\n"));
+    if (hash === this.toolHash) return undefined;
+
+    const previous = new Set(this.toolNames);
+    const next = new Set(names);
+    const added = names.filter((name) => !previous.has(name));
+    const removed = this.toolNames.filter((name) => !next.has(name));
+    const change = this.toolHash === undefined ? "initial" : "changed";
+
+    this.toolHash = hash;
+    this.toolNames = names;
+
+    return {
+      kind: "context.tool_catalog",
+      attrs: {
+        hash,
+        tool_count: names.length,
+        added,
+        removed,
+        change,
+      },
+    };
+  }
 }
 
 /* -------------------------------------------------------------------------- */

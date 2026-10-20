@@ -39,6 +39,8 @@ export type EventKind =
   | "session.end"
   | "turn.start"
   | "turn.end"
+  | "context.system_prompt"
+  | "context.tool_catalog"
   | "message.user"
   | "message.agent"
   | "reasoning"
@@ -70,6 +72,8 @@ export const EVENT_KINDS = [
   "session.end",
   "turn.start",
   "turn.end",
+  "context.system_prompt",
+  "context.tool_catalog",
   "message.user",
   "message.agent",
   "reasoning",
@@ -489,6 +493,54 @@ export interface SegmentBoundaryAttrs {
   derived?: boolean;
 }
 
+/** How a context snapshot differs from the previous one (design §16.1). */
+export type ContextChange = "initial" | "changed";
+
+/** Runtime list of every known {@link ContextChange}. */
+export const CONTEXT_CHANGES = ["initial", "changed"] as const satisfies readonly ContextChange[];
+
+/**
+ * `context.system_prompt` attributes (design §16.1).
+ *
+ * The event is emitted when the system prompt is first seen and whenever its
+ * content changes. `hash` is the first 32 hex characters of the SHA-256 of the
+ * prompt text, so a prompt can be compared without storing its content.
+ *
+ * `length_chars` is the length of the prompt text in JavaScript characters.
+ * The prompt itself may appear in `content.input.text`; the capture policy
+ * decides whether it is present, exactly as for every other content payload.
+ */
+export interface ContextSystemPromptAttrs {
+  /** `sha256-32hex` of the prompt text. */
+  hash: string;
+  /** Length of the prompt in characters. */
+  length_chars: number;
+  /** First sighting or a change of the prompt. */
+  change: ContextChange;
+}
+
+/**
+ * `context.tool_catalog` attributes (design §16.1).
+ *
+ * The event is emitted when the set of available tools is first seen and
+ * whenever the set changes. `hash` covers the sorted tool names, `added` and
+ * `removed` are the difference to the previous catalog and `tool_count` is
+ * the size of the new catalog. A source that only records tool names still
+ * produces a complete event; a source that records no tool list emits none.
+ */
+export interface ContextToolCatalogAttrs {
+  /** `sha256-32hex` of the sorted tool names. */
+  hash: string;
+  /** Number of tools in the new catalog. */
+  tool_count: number;
+  /** Names that were not in the previous catalog, sorted. */
+  added: string[];
+  /** Names that are no longer present, sorted. */
+  removed: string[];
+  /** First sighting or a change of the catalog. */
+  change: ContextChange;
+}
+
 /** `permission.request` attributes. */
 export interface PermissionRequestAttrs {
   tool?: string;
@@ -537,6 +589,8 @@ export interface AttrsByKind {
   "session.end": SessionEndAttrs;
   "turn.start": TurnStartAttrs;
   "turn.end": TurnEndAttrs;
+  "context.system_prompt": ContextSystemPromptAttrs;
+  "context.tool_catalog": ContextToolCatalogAttrs;
   "message.user": MessageAttrs;
   "message.agent": MessageAttrs;
   reasoning: MessageAttrs;
@@ -579,6 +633,7 @@ const CONTENT_CAPTURE_SET: ReadonlySet<string> = new Set(CONTENT_CAPTURES);
 const USAGE_SOURCE_SET: ReadonlySet<string> = new Set(USAGE_SOURCES);
 const COST_SOURCE_SET: ReadonlySet<string> = new Set(COST_SOURCES);
 const LLM_CALL_PURPOSE_SET: ReadonlySet<string> = new Set(LLM_CALL_PURPOSES);
+const CONTEXT_CHANGE_SET: ReadonlySet<string> = new Set(CONTEXT_CHANGES);
 
 /** ISO-8601 instant: `2026-01-02T03:04:05Z`, with optional fraction and offset. */
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -675,6 +730,56 @@ const REQUIRED_LLM_ATTRS = [
 
 const isPositiveInteger = (value: unknown): value is number =>
   isFiniteNumber(value) && Number.isInteger(value) && value >= 1;
+
+const isNonNegativeInteger = (value: unknown): value is number =>
+  isFiniteNumber(value) && Number.isInteger(value) && value >= 0;
+
+/** A `sha256-32hex` digest: 32 lower-case hexadecimal characters. */
+const CONTEXT_HASH = /^[0-9a-f]{32}$/;
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((entry) => typeof entry === "string");
+
+const validateContextChange = (value: unknown, errors: string[]): void => {
+  if (typeof value !== "string" || !CONTEXT_CHANGE_SET.has(value)) {
+    errors.push(`attrs.change: must be one of ${CONTEXT_CHANGES.join(", ")}`);
+  }
+};
+
+const validateSystemPromptAttrs = (attrs: Record<string, unknown>, errors: string[]): void => {
+  for (const key of ["hash", "length_chars", "change"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(attrs, key)) {
+      errors.push(`attrs.${key}: must be present`);
+    }
+  }
+  if (typeof attrs.hash !== "string" || !CONTEXT_HASH.test(attrs.hash)) {
+    errors.push("attrs.hash: must be a sha256-32hex string");
+  }
+  if (!isNonNegativeInteger(attrs.length_chars)) {
+    errors.push("attrs.length_chars: must be a non-negative integer");
+  }
+  validateContextChange(attrs.change, errors);
+};
+
+const validateToolCatalogAttrs = (attrs: Record<string, unknown>, errors: string[]): void => {
+  for (const key of ["hash", "tool_count", "added", "removed", "change"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(attrs, key)) {
+      errors.push(`attrs.${key}: must be present`);
+    }
+  }
+  if (typeof attrs.hash !== "string" || !CONTEXT_HASH.test(attrs.hash)) {
+    errors.push("attrs.hash: must be a sha256-32hex string");
+  }
+  if (!isNonNegativeInteger(attrs.tool_count)) {
+    errors.push("attrs.tool_count: must be a non-negative integer");
+  }
+  for (const key of ["added", "removed"] as const) {
+    if (!isStringArray(attrs[key])) {
+      errors.push(`attrs.${key}: must be an array of strings`);
+    }
+  }
+  validateContextChange(attrs.change, errors);
+};
 
 const validateLlmCallRetry = (retry: unknown, errors: string[]): void => {
   if (retry === null) return;
@@ -832,6 +937,10 @@ export function validateEvent(event: unknown): ValidationResult {
     errors.push("attrs: must be an object");
   } else if (event.kind === "llm.call") {
     validateLlmCallAttrs(event.attrs, errors);
+  } else if (event.kind === "context.system_prompt") {
+    validateSystemPromptAttrs(event.attrs, errors);
+  } else if (event.kind === "context.tool_catalog") {
+    validateToolCatalogAttrs(event.attrs, errors);
   }
 
   if (event.content !== undefined) {

@@ -39,6 +39,7 @@ import {
 } from "@openmatel/core";
 
 import {
+  ContextTracker,
   EventScope,
   SourceEventFactory,
   ToolCallRegistry,
@@ -58,6 +59,8 @@ import {
   llmCallAttrs,
   parseJsonlText,
   sessionStartAttrs,
+  systemPromptTextFromSections,
+  toolNamesFromCatalog,
   textFromContent,
   timestampOf,
   truncateTitle,
@@ -172,6 +175,8 @@ interface PiState {
   pendingBoundaries: PendingBoundary[];
   /** Latest timestamp of any record of the file, for the closing events. */
   latestRecordTs?: string;
+  /** System prompt and tool catalog snapshots of the session. */
+  context: ContextTracker;
 }
 
 interface PendingBoundary {
@@ -192,6 +197,7 @@ function createState(file: SessionFile): PiState {
     segmentId: FIRST_SEGMENT_ID,
     lastContextTokens: null,
     pendingBoundaries: [],
+    context: new ContextTracker(),
   };
 }
 
@@ -356,6 +362,87 @@ function contextWindowOf(value: Record<string, unknown>): number | undefined {
   return asNumber(value.contextWindow) ?? asNumber(value.context_window);
 }
 
+/** Emit a system prompt snapshot when it is new or changed. */
+function emitSystemPrompt(
+  state: PiState,
+  text: string,
+  ts: string,
+  ref: string,
+): void {
+  const observation = state.context.observeSystemPrompt(text);
+  if (observation === undefined) return;
+  state.events.push(
+    state.factory.create({
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: observation.kind,
+      segmentId: state.segmentId,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      content: observation.content,
+      ref,
+    }),
+  );
+}
+
+/** Emit a tool catalog snapshot when it is new or changed. */
+function emitToolCatalog(
+  state: PiState,
+  tools: unknown,
+  ts: string,
+  ref: string,
+): void {
+  if (!Array.isArray(tools)) return;
+  const observation = state.context.observeToolCatalog(tools);
+  if (observation === undefined) return;
+  state.events.push(
+    state.factory.create({
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: observation.kind,
+      segmentId: state.segmentId,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      ref,
+    }),
+  );
+}
+
+/**
+ * Handle a system message.
+ *
+ * pi stores the prompt as `message.content` or as named sections and exposes
+ * the tool catalog as a full `tools` list or as `toolsAdded` / `toolsRemoved`
+ * deltas. Both shapes are recorded by the source, so both are mapped.
+ */
+function handleSystemMessage(
+  state: PiState,
+  message: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  const contentText = textFromContent(message.content);
+  const sectionsText = systemPromptTextFromSections(message.sections);
+  const systemPrompt = contentText !== "" ? contentText : sectionsText;
+
+  let tools: unknown;
+  if (Array.isArray(message.tools)) {
+    tools = message.tools;
+  } else if (Array.isArray(message.toolsAdded) || Array.isArray(message.toolsRemoved)) {
+    const names = new Set(state.context.currentToolNames());
+    for (const name of toolNamesFromCatalog(message.toolsRemoved)) names.delete(name);
+    for (const name of toolNamesFromCatalog(message.toolsAdded)) names.add(name);
+    tools = [...names].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  }
+
+  if (systemPrompt === undefined && tools === undefined) return;
+  ensureSessionStart(state, ts, ref);
+  if (systemPrompt !== undefined) emitSystemPrompt(state, systemPrompt, ts, ref);
+  if (tools !== undefined) emitToolCatalog(state, tools, ts, ref);
+}
+
 /** Handle the `session` record. */
 function handleSession(state: PiState, data: Record<string, unknown>, ts: string, ref: string): void {
   const version = asNumber(data.version);
@@ -452,9 +539,11 @@ function handleMessage(
     case "toolResult":
       handleToolResult(state, message ?? {}, ts, ref);
       return;
+    case "system":
+      handleSystemMessage(state, message ?? {}, ts, ref);
+      return;
     default:
-      // The system message holds the instructions of the agent; it is not
-      // part of the conversation.
+      // A message of any other role is not part of the conversation.
       return;
   }
 }

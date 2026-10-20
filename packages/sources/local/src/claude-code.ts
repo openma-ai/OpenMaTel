@@ -39,6 +39,7 @@ import {
 } from "@openmatel/core";
 
 import {
+  ContextTracker,
   EventScope,
   SourceEventFactory,
   ToolCallRegistry,
@@ -210,6 +211,12 @@ interface ClaudeState {
   latestRecordTs?: string;
   /** Retry reported by a `system` error, applied to the next model call. */
   pendingRetry?: LlmCallRetry;
+  /** System prompt and tool catalog snapshots of the session. */
+  context: ContextTracker;
+  /** Whether a `prompt_snapshot` already supplied the system prompt. */
+  sawSnapshotSystem: boolean;
+  /** Whether a `prompt_snapshot` already supplied the tool list. */
+  sawSnapshotTools: boolean;
 }
 
 /** Create the state for one session file. */
@@ -233,6 +240,9 @@ function createState(file: SessionFile): ClaudeState {
     requestContextWindows: new Map(),
     latestRequestConsumed: false,
     sawConversation: false,
+    context: new ContextTracker(),
+    sawSnapshotSystem: false,
+    sawSnapshotTools: false,
   };
 }
 
@@ -419,6 +429,112 @@ function maybeOpenResumeBoundary(
   ensureSessionStart(state, data, ts, ref);
   openSegment(state, reason, ts, ref);
   state.resumeLeaf = undefined;
+}
+
+/** Emit a system prompt snapshot when it is new or changed. */
+function emitSystemPrompt(
+  state: ClaudeState,
+  text: string,
+  ts: string,
+  ref: string,
+): void {
+  const observation = state.context.observeSystemPrompt(text);
+  if (observation === undefined) return;
+  state.events.push(
+    createEvent(state, {
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: observation.kind,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      content: observation.content,
+      ref,
+    }),
+  );
+}
+
+/** Emit a tool catalog snapshot when it is new or changed. */
+function emitToolCatalog(
+  state: ClaudeState,
+  tools: unknown,
+  ts: string,
+  ref: string,
+): void {
+  if (!Array.isArray(tools)) return;
+  const observation = state.context.observeToolCatalog(tools);
+  if (observation === undefined) return;
+  state.events.push(
+    createEvent(state, {
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: observation.kind,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      ref,
+    }),
+  );
+}
+
+/**
+ * Handle an `attachment` record.
+ *
+ * `prompt_snapshot` is the record in which Claude Code stores the system
+ * prompt it assembled, and newer versions also put the tool list there.
+ */
+function handleAttachment(
+  state: ClaudeState,
+  record: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  const attachment = isPlainObject(record.attachment) ? record.attachment : undefined;
+  if (attachment === undefined) return;
+  if (asString(attachment.type) !== "prompt_snapshot") return;
+
+  const systemPrompt = textFromContent(attachment.systemPrompt);
+  if (systemPrompt !== "") {
+    state.sawSnapshotSystem = true;
+    ensureSessionStart(state, record, ts, ref);
+    emitSystemPrompt(state, systemPrompt, ts, ref);
+  }
+
+  if (Array.isArray(attachment.tools)) {
+    state.sawSnapshotTools = true;
+    ensureSessionStart(state, record, ts, ref);
+    emitToolCatalog(state, attachment.tools, ts, ref);
+  }
+}
+
+/**
+ * Handle an `api-request-shape` record.
+ *
+ * It carries the system blocks and the tool definitions of one request. It is
+ * the fallback when no `prompt_snapshot` supplied that part of the context;
+ * the snapshot wins so the same request is not reported twice.
+ */
+function handleRequestShape(
+  state: ClaudeState,
+  record: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  const shape = isPlainObject(record.shape) ? record.shape : undefined;
+  if (shape === undefined) return;
+
+  if (!state.sawSnapshotSystem) {
+    const systemPrompt = textFromContent(shape.system);
+    if (systemPrompt !== "") {
+      ensureSessionStart(state, record, ts, ref);
+      emitSystemPrompt(state, systemPrompt, ts, ref);
+    }
+  }
+
+  if (!state.sawSnapshotTools) {
+    ensureSessionStart(state, record, ts, ref);
+    emitToolCatalog(state, shape.tools, ts, ref);
+  }
 }
 
 /** Make sure the session start event exists. */
@@ -1071,10 +1187,16 @@ function handleRecord(state: ClaudeState, record: RawRecord): void {
       }
       break;
     }
-    case "attachment":
+    case "attachment": {
+      handleAttachment(state, data, ts, ref);
+      break;
+    }
+    case "api-request-shape": {
+      handleRequestShape(state, data, ts, ref);
+      break;
+    }
     case "queue-operation":
     case "api-request-blob":
-    case "api-request-shape":
     case "atis-latch":
     case "cost-state":
       break;

@@ -42,6 +42,7 @@ import {
 } from "@openmatel/core";
 
 import {
+  ContextTracker,
   EventScope,
   SourceEventFactory,
   ToolCallRegistry,
@@ -272,6 +273,8 @@ interface CodexState {
   lastLlm?: AgentEvent;
   /** A tool result closed the previous response; the next item opens a new call. */
   responseClosed: boolean;
+  /** System prompt and tool catalog snapshots of the session. */
+  context: ContextTracker;
   /** The user messages that were already emitted, per turn. */
   seenUserTexts: Set<string>;
   /** Latest timestamp of any record of the file, for the closing events. */
@@ -284,6 +287,7 @@ function createState(file: SessionFile): CodexState {
     factory: new SourceEventFactory(file.source, file.sourceSessionId, FORMAT),
     scope: new EventScope(),
     events: [],
+    context: new ContextTracker(),
     segmentId: FIRST_SEGMENT_ID,
     segmentIndex: 0,
     lastContextTokens: null,
@@ -656,6 +660,54 @@ function emitUserMessage(state: CodexState, text: string, ts: string, ref: strin
   );
 }
 
+/** Emit a system prompt snapshot when it is new or changed. */
+function emitSystemPrompt(
+  state: CodexState,
+  text: string,
+  ts: string,
+  ref: string,
+): void {
+  const observation = state.context.observeSystemPrompt(text);
+  if (observation === undefined) return;
+  state.events.push(
+    state.factory.create({
+      line: state.scope.line,
+      sub: state.scope.next(),
+      segmentId: state.segmentId,
+      kind: observation.kind,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      content: observation.content,
+      ref,
+    }),
+  );
+}
+
+/** Emit a tool catalog snapshot when the source recorded one. */
+function emitToolCatalog(
+  state: CodexState,
+  tools: unknown,
+  ts: string,
+  ref: string,
+): void {
+  if (!Array.isArray(tools)) return;
+  const observation = state.context.observeToolCatalog(tools);
+  if (observation === undefined) return;
+  state.events.push(
+    state.factory.create({
+      line: state.scope.line,
+      sub: state.scope.next(),
+      segmentId: state.segmentId,
+      kind: observation.kind,
+      ts,
+      turnId: state.turnOpen ? state.turnId : undefined,
+      attrs: observation.attrs,
+      ref,
+    }),
+  );
+}
+
 /** Handle the `session_meta` record. */
 function handleSessionMeta(
   state: CodexState,
@@ -676,13 +728,25 @@ function handleSessionMeta(
   const branch = asString(git?.branch);
   if (branch !== undefined) state.gitBranch = branch;
 
-  const provenance = isPlainObject(payload.base_instructions)
-    ? isPlainObject(payload.base_instructions.provenance)
-      ? payload.base_instructions.provenance
-      : undefined
+  const baseInstructions = isPlainObject(payload.base_instructions)
+    ? payload.base_instructions
+    : undefined;
+  const provenance = isPlainObject(baseInstructions?.provenance)
+    ? baseInstructions.provenance
     : undefined;
   const model = asString(provenance?.model) ?? asString(payload.model);
   if (model !== undefined) state.model = model;
+
+  // Codex records the effective system prompt as `base_instructions.text`.
+  // The tool list is not part of the header or of `turn_context` in the
+  // versions on this machine, so no tool catalog is emitted for Codex.
+  const systemPrompt =
+    asString(payload.base_instructions) ?? asString(baseInstructions?.text);
+  if (systemPrompt !== undefined) emitSystemPrompt(state, systemPrompt, ts, ref);
+
+  const tools =
+    payload.tools ?? payload.tool_names ?? payload.available_tools ?? baseInstructions?.tools;
+  emitToolCatalog(state, tools, ts, ref);
 
   const nativeSessionId = asString(payload.id);
   if (nativeSessionId !== undefined) state.nativeSessionId = nativeSessionId;
@@ -700,6 +764,8 @@ function handleSessionMeta(
 function handleTurnContext(
   state: CodexState,
   payload: Record<string, unknown>,
+  ts: string,
+  ref: string,
 ): void {
   const provider = asString(payload.model_provider) ?? asString(payload.provider);
   if (provider !== undefined) state.provider = provider;
@@ -713,6 +779,20 @@ function handleTurnContext(
     state.cwd = cwd;
     if (state.sessionStart) state.sessionStart.attrs.cwd = cwd;
   }
+
+  // Newer turn contexts may repeat the effective prompt or the tool catalog.
+  // Only a field the record actually carries is observed; the local samples
+  // carry neither, so the normalizer emits nothing for them.
+  const baseInstructions = isPlainObject(payload.base_instructions)
+    ? payload.base_instructions
+    : undefined;
+  const systemPrompt =
+    asString(payload.base_instructions) ?? asString(baseInstructions?.text);
+  if (systemPrompt !== undefined) emitSystemPrompt(state, systemPrompt, ts, ref);
+  const tools =
+    payload.tools ?? payload.tool_names ?? payload.available_tools ?? baseInstructions?.tools;
+  emitToolCatalog(state, tools, ts, ref);
+
   // `turn_context` is harness bookkeeping, not a real user input: it does not
   // open a turn (design §15.2).
 }
@@ -995,7 +1075,7 @@ function handleRecord(state: CodexState, record: RawRecord): void {
       break;
     }
     case "turn_context": {
-      if (payload) handleTurnContext(state, payload);
+      if (payload) handleTurnContext(state, payload, ts, ref);
       break;
     }
     case "event_msg": {

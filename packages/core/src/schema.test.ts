@@ -245,6 +245,72 @@ describe("validateEvent", () => {
     expect(retryErrors).toContain("attrs.retry.error_code: must be a string or null");
   });
 
+  it("accepts context.system_prompt and validates its attributes", () => {
+    const event = validEvent();
+    event.kind = "context.system_prompt";
+    delete event.step_id;
+    delete event.turn_id;
+    event.attrs = {
+      hash: "0123456789abcdef0123456789abcdef",
+      length_chars: 42,
+      change: "initial",
+    };
+    event.content = { input: { text: "synthetic system prompt" }, capture: "full" };
+    expect(validateEvent(event)).toEqual({ ok: true });
+
+    event.attrs = { ...event.attrs, change: "changed" };
+    expect(validateEvent(event)).toEqual({ ok: true });
+
+    event.attrs = { hash: "not-a-hash", length_chars: -1, change: "updated" };
+    const errors = errorsOf(event);
+    expect(errors).toContain("attrs.hash: must be a sha256-32hex string");
+    expect(errors).toContain("attrs.length_chars: must be a non-negative integer");
+    expect(errors).toContain("attrs.change: must be one of initial, changed");
+
+    const missing = errorsOf({ ...event, attrs: {} });
+    expect(missing).toContain("attrs.hash: must be present");
+    expect(missing).toContain("attrs.length_chars: must be present");
+    expect(missing).toContain("attrs.change: must be present");
+  });
+
+  it("accepts context.tool_catalog and validates its attributes", () => {
+    const event = validEvent();
+    event.kind = "context.tool_catalog";
+    delete event.step_id;
+    event.attrs = {
+      hash: "fedcba9876543210fedcba9876543210",
+      tool_count: 2,
+      added: ["read", "write"],
+      removed: [],
+      change: "initial",
+    };
+    event.content = undefined;
+    expect(validateEvent(event)).toEqual({ ok: true });
+
+    event.attrs = {
+      hash: "fedcba9876543210fedcba9876543210",
+      tool_count: 2,
+      added: [],
+      removed: ["bash"],
+      change: "changed",
+    };
+    expect(validateEvent(event)).toEqual({ ok: true });
+
+    event.attrs = {
+      hash: "UPPERCASE",
+      tool_count: -1,
+      added: "read",
+      removed: [42],
+      change: "other",
+    };
+    const errors = errorsOf(event);
+    expect(errors).toContain("attrs.hash: must be a sha256-32hex string");
+    expect(errors).toContain("attrs.tool_count: must be a non-negative integer");
+    expect(errors).toContain("attrs.added: must be an array of strings");
+    expect(errors).toContain("attrs.removed: must be an array of strings");
+    expect(errors).toContain("attrs.change: must be one of initial, changed");
+  });
+
   it("accepts a segment.boundary event", () => {
     const event = validEvent();
     event.kind = "segment.boundary";

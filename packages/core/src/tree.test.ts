@@ -141,6 +141,64 @@ describe("buildSessionTree", () => {
     expect(turns[0].steps.every((step) => step.children.length === 0)).toBe(true);
   });
 
+  it("keeps context snapshots out of steps and turns", () => {
+    const sessionPrompt = event({
+      event_id: "ev_system_prompt",
+      kind: "context.system_prompt",
+      ts: "2026-01-02T02:59:59.000Z",
+      attrs: {
+        hash: "0123456789abcdef0123456789abcdef",
+        length_chars: 20,
+        change: "initial",
+      },
+    });
+    const turnPrompt = event({
+      event_id: "ev_turn_prompt",
+      kind: "context.system_prompt",
+      turn_id: "turn_1",
+      ts: "2026-01-02T03:00:03.500Z",
+      attrs: {
+        hash: "fedcba9876543210fedcba9876543210",
+        length_chars: 21,
+        change: "changed",
+      },
+    });
+    const tools = event({
+      event_id: "ev_tool_catalog",
+      kind: "context.tool_catalog",
+      turn_id: "turn_1",
+      ts: "2026-01-02T03:00:03.600Z",
+      attrs: {
+        hash: "00112233445566778899aabbccddeeff",
+        tool_count: 1,
+        added: ["read"],
+        removed: [],
+        change: "initial",
+      },
+    });
+
+    const { turns, session } = buildSessionTree([
+      sessionPrompt,
+      sessionStart,
+      toolCall,
+      childStep,
+      turnPrompt,
+      tools,
+    ]);
+
+    // A context snapshot outside a turn is session-level: it must not create
+    // the synthetic turn. The snapshots inside turn_1 stay in its event list
+    // but are not steps.
+    expect(turns.map((turn) => turn.turn_id)).toEqual(["turn_1"]);
+    expect(session.turn_count).toBe(1);
+    expect(session.step_count).toBe(2);
+    const turn = turnById(turns, "turn_1");
+    expect(turn.summary.step_count).toBe(2);
+    expect(turn.events.map((entry) => entry.event_id)).toContain("ev_turn_prompt");
+    expect(turn.events.map((entry) => entry.event_id)).toContain("ev_tool_catalog");
+    expect(turn.steps.map((step) => step.step_id)).toEqual(["st_tool"]);
+  });
+
   it("collects events without a turn in a synthetic turn", () => {
     const { turns } = buildSessionTree([sessionStart, { ...toolCall, turn_id: undefined }]);
 
