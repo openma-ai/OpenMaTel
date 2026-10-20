@@ -376,14 +376,18 @@ function SegmentSection({
   const [expanded, setExpanded] = useState(true);
   const segment = group.segment;
   const turnCount = segment?.turn_count ?? group.turns.length;
+  const leadingGaps = group.leading_idle_gaps;
 
   const rows = (
     <>
-      {group.turns.map((row, index) => (
+      {group.turns.map((row) => (
         <Fragment key={row.turn.turn_id}>
-          {row.idle_gap !== null && index > 0 && (
-            <IdleGapMarker gap={row.idle_gap} />
-          )}
+          {row.preceding_idle_gaps.map((gap) => (
+            <IdleGapMarker
+              key={`${gap.after_event_id}:${gap.before_event_id}`}
+              gap={gap}
+            />
+          ))}
           <TurnRowComponent row={row} onOpenChild={onOpenChild} />
         </Fragment>
       ))}
@@ -391,7 +395,17 @@ function SegmentSection({
   );
 
   if (!showChrome) {
-    return <div className="flex flex-col gap-2">{rows}</div>;
+    return (
+      <div className="flex flex-col gap-2">
+        {leadingGaps.map((gap) => (
+          <IdleGapMarker
+            key={`${gap.after_event_id}:${gap.before_event_id}`}
+            gap={gap}
+          />
+        ))}
+        {rows}
+      </div>
+    );
   }
 
   return (
@@ -425,6 +439,12 @@ function SegmentSection({
 
       {expanded && (
         <div className="flex flex-col gap-2 p-2">
+          {leadingGaps.map((gap) => (
+            <IdleGapMarker
+              key={`${gap.after_event_id}:${gap.before_event_id}`}
+              gap={gap}
+            />
+          ))}
           {segment !== null && segment.boundary !== undefined && (
             <SegmentBoundaryNode boundary={segment.boundary} />
           )}

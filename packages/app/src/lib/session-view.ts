@@ -30,6 +30,12 @@ export interface TurnRow {
   /** Gap between the previous turn and this one; `null` when there is none. */
   idle_gap: IdleGap | null;
   /**
+   * Every gap before this turn and after the previous turn (or segment
+   * boundary), in time order. Usually zero or one entry; the list keeps all
+   * of them so no gap is dropped when non-turn events interleave.
+   */
+  preceding_idle_gaps: IdleGap[];
+  /**
    * Gaps inside this turn, in time order. They are rendered above the turn's
    * timeline when the row is expanded.
    */
@@ -44,6 +50,19 @@ export interface SegmentGroup {
   /** Full segment row when the Query API returned one. */
   segment: SegmentView | null;
   turns: TurnRow[];
+  /**
+   * The gap that immediately precedes this segment, rendered above its
+   * boundary. This is the last entry of {@link leading_idle_gaps}, or `null`
+   * when the segment starts without an idle gap.
+   */
+  idle_gap: IdleGap | null;
+  /**
+   * Gaps before the segment's first event (the `segment.boundary` node when
+   * there is one), in time order.
+   */
+  leading_idle_gaps: IdleGap[];
+  /** Alias of {@link leading_idle_gaps}. */
+  idle_gaps: IdleGap[];
 }
 
 /** A `subagent.spawn` / `handoff` event flattened for the drill-down link. */
@@ -155,6 +174,124 @@ const END_BOOKKEEPING_KINDS: ReadonlySet<string> = new Set([
   "session.end",
 ]);
 
+/** Where an event lives in the segment → turn view. */
+interface GapEventMeta {
+  turn_id: string | null;
+  segment_id: string;
+  kind: string;
+}
+
+interface GapContext {
+  events: AgentEvent[];
+  meta: Map<string, GapEventMeta>;
+}
+
+/**
+ * Collect every event that can participate in an idle gap.
+ *
+ * Turn events are not enough: a `segment.boundary` lives on the segment and
+ * never inside a turn, so a gap ending at the boundary would otherwise be
+ * dropped — or, worse, the turn-only gap calculation would bridge across the
+ * boundary and fabricate a gap on the first turn of the next segment.
+ */
+const gapContext = (
+  segments: readonly SegmentView[],
+  turns: readonly TurnView[],
+): GapContext => {
+  const events: AgentEvent[] = [];
+  const meta = new Map<string, GapEventMeta>();
+
+  for (const turn of turns) {
+    for (const event of turn.events) {
+      if (!isObject(event) || typeof event.event_id !== "string") continue;
+      events.push(event);
+      meta.set(event.event_id, {
+        turn_id: turn.turn_id,
+        segment_id: turn.segment_id,
+        kind: event.kind,
+      });
+    }
+  }
+
+  for (const segment of segments) {
+    const boundary = segment.boundary;
+    if (boundary === undefined || typeof boundary.event_id !== "string") continue;
+    events.push(boundary);
+    meta.set(boundary.event_id, {
+      turn_id: null,
+      segment_id: segment.segment_id,
+      kind: boundary.kind,
+    });
+  }
+
+  return { events, meta };
+};
+
+export interface ClassifiedIdleGaps {
+  /** Gaps immediately before a segment's first event, by segment id. */
+  beforeSegment: Map<string, IdleGap[]>;
+  /** Gaps between two turns (or a boundary and the next turn), by turn id. */
+  beforeTurn: Map<string, IdleGap[]>;
+  /** Gaps wholly inside one turn. */
+  withinTurn: Map<string, IdleGap[]>;
+}
+
+const appendGap = (
+  byKey: Map<string, IdleGap[]>,
+  key: string,
+  gap: IdleGap,
+): void => {
+  const list = byKey.get(key);
+  if (list === undefined) byKey.set(key, [gap]);
+  else list.push(gap);
+};
+
+/**
+ * Split the session's idle gaps into the three places the Turns view can
+ * render them. Every gap from `idleGaps` is returned exactly once, except
+ * gaps ending at `turn.end` / `session.end` bookkeeping, which are the
+ * closure of the trace rather than a pause of the agent.
+ *
+ * A gap whose following event is a `segment.boundary` (or otherwise does not
+ * belong to a turn) opens the segment instead of attaching to a turn, so it
+ * can be drawn above `SegmentBoundaryNode` even when the segment has no turns.
+ */
+export function classifyIdleGaps(
+  segments: readonly SegmentView[],
+  turns: readonly TurnView[],
+  thresholdMs: number = DEFAULT_IDLE_THRESHOLD_MS,
+): ClassifiedIdleGaps {
+  const { events, meta } = gapContext(segments, turns);
+  const beforeSegment = new Map<string, IdleGap[]>();
+  const beforeTurn = new Map<string, IdleGap[]>();
+  const withinTurn = new Map<string, IdleGap[]>();
+
+  for (const gap of idleGaps(events, thresholdMs)) {
+    const after = meta.get(gap.after_event_id);
+    const before = meta.get(gap.before_event_id);
+    if (before === undefined) continue;
+
+    // A gap that ends at turn/session closure is not agent idle time.
+    if (END_BOOKKEEPING_KINDS.has(before.kind)) continue;
+
+    if (before.turn_id === null) {
+      // The next event is a segment node (normally the boundary) or another
+      // session-level event: this gap belongs above the segment.
+      appendGap(beforeSegment, before.segment_id, gap);
+      continue;
+    }
+
+    if (after !== undefined && after.turn_id === before.turn_id) {
+      appendGap(withinTurn, before.turn_id, gap);
+      continue;
+    }
+
+    appendGap(beforeTurn, before.turn_id, gap);
+  }
+
+  return { beforeSegment, beforeTurn, withinTurn };
+}
+
 /**
  * The idle gaps inside one turn.
  *
@@ -219,8 +356,7 @@ export function groupTurnsBySegment(
   turns: readonly TurnView[],
   thresholdMs: number = DEFAULT_IDLE_THRESHOLD_MS,
 ): SegmentGroup[] {
-  const gaps = idleGapByTurn(turns, thresholdMs);
-  const internalGaps = internalIdleGapsByTurn(turns, thresholdMs);
+  const gaps = classifyIdleGaps(segments, turns, thresholdMs);
   const turnsBySegment = new Map<string, TurnView[]>();
 
   for (const turn of turns) {
@@ -232,23 +368,31 @@ export function groupTurnsBySegment(
   const groups: SegmentGroup[] = [];
   const emitted = new Set<string>();
 
+  const group = (segmentId: string, segment: SegmentView | null): SegmentGroup => {
+    const leading = gaps.beforeSegment.get(segmentId) ?? [];
+    return {
+      segment_id: segmentId,
+      segment,
+      turns: turnRows(
+        turnsBySegment.get(segmentId) ?? [],
+        gaps.beforeTurn,
+        gaps.withinTurn,
+      ),
+      idle_gap: leading.length === 0 ? null : leading[leading.length - 1]!,
+      leading_idle_gaps: leading,
+      idle_gaps: leading,
+    };
+  };
+
   for (const segment of segments) {
     emitted.add(segment.segment_id);
-    groups.push({
-      segment_id: segment.segment_id,
-      segment,
-      turns: turnRows(turnsBySegment.get(segment.segment_id) ?? [], gaps, internalGaps),
-    });
+    groups.push(group(segment.segment_id, segment));
   }
 
-  for (const [segmentId, segmentTurns] of turnsBySegment) {
+  for (const segmentId of turnsBySegment.keys()) {
     if (emitted.has(segmentId)) continue;
     emitted.add(segmentId);
-    groups.push({
-      segment_id: segmentId,
-      segment: null,
-      turns: turnRows(segmentTurns, gaps, internalGaps),
-    });
+    groups.push(group(segmentId, null));
   }
 
   return groups;
@@ -256,14 +400,21 @@ export function groupTurnsBySegment(
 
 const turnRows = (
   turns: readonly TurnView[],
-  gaps: ReadonlyMap<string, IdleGap>,
+  gaps: ReadonlyMap<string, IdleGap[]>,
   internalGaps: ReadonlyMap<string, IdleGap[]>,
 ): TurnRow[] =>
   turns.map((turn) => {
+    const preceding = gaps.get(turn.turn_id) ?? [];
     const inside = internalGaps.get(turn.turn_id) ?? [];
+    const widest = preceding.reduce<IdleGap | null>(
+      (current, gap) =>
+        current === null || gap.duration_ms > current.duration_ms ? gap : current,
+      null,
+    );
     return {
       turn,
-      idle_gap: gaps.get(turn.turn_id) ?? null,
+      idle_gap: widest,
+      preceding_idle_gaps: preceding,
       internal_idle_gaps: inside,
       idle_gaps: inside,
     };

@@ -322,6 +322,129 @@ describe("segment and turn grouping", () => {
     expect(row?.idle_gaps).toEqual(row?.internal_idle_gaps);
   });
 
+  it("puts a gap before a resume boundary on the empty segment", () => {
+    const before = turnView("turn_1", "seg_0", [
+      event("r1", "message.user", "2026-10-20T10:00:00Z", {
+        turn_id: "turn_1",
+      }),
+    ]);
+    const boundary = event(
+      "r2",
+      "segment.boundary",
+      "2026-10-20T11:00:00Z",
+      {
+        segment_id: "seg_resume",
+        attrs: { reason: "resume" },
+      },
+    );
+    const groups = groupTurnsBySegment(
+      [
+        segmentView("seg_0"),
+        segmentView("seg_resume", {
+          boundary,
+          turn_count: 0,
+          started_at: boundary.ts,
+          ended_at: boundary.ts,
+        }),
+      ],
+      [before],
+    );
+
+    expect(groups.map((group) => group.segment_id)).toEqual([
+      "seg_0",
+      "seg_resume",
+    ]);
+    const resume = groups[1]!;
+    expect(resume.turns).toEqual([]);
+    expect(resume.idle_gap).toMatchObject({
+      after_event_id: "r1",
+      before_event_id: "r2",
+      start: "2026-10-20T10:00:00.000Z",
+      end: "2026-10-20T11:00:00.000Z",
+      duration_ms: 60 * 60 * 1000,
+    });
+    expect(resume.leading_idle_gaps).toEqual([resume.idle_gap]);
+    expect(groups[0]?.idle_gap).toBeNull();
+    expect(groups[0]?.turns[0]?.idle_gap).toBeNull();
+  });
+
+  it("renders every idle gap exactly once and never bridges a boundary", () => {
+    const first = turnView("turn_1", "seg_0", [
+      event("n1", "message.user", "2026-10-20T10:00:00Z", {
+        turn_id: "turn_1",
+      }),
+      event("n2", "message.user", "2026-10-20T10:10:00Z", {
+        turn_id: "turn_1",
+      }),
+    ]);
+    const boundaryOne = event(
+      "n3",
+      "segment.boundary",
+      "2026-10-20T11:00:00Z",
+      { segment_id: "seg_1", attrs: { reason: "resume" } },
+    );
+    const second = turnView("turn_2", "seg_1", [
+      event("n4", "llm.call", "2026-10-20T11:05:00Z", {
+        turn_id: "turn_2",
+        segment_id: "seg_1",
+      }),
+      event("n5", "tool.call", "2026-10-20T12:05:00Z", {
+        turn_id: "turn_2",
+        segment_id: "seg_1",
+      }),
+    ]);
+    const boundaryTwo = event(
+      "n6",
+      "segment.boundary",
+      "2026-10-20T14:00:00Z",
+      { segment_id: "seg_2", attrs: { reason: "compaction" } },
+    );
+    const third = turnView("turn_3", "seg_2", [
+      event("n7", "message.user", "2026-10-20T15:00:00Z", {
+        turn_id: "turn_3",
+        segment_id: "seg_2",
+      }),
+    ]);
+
+    const groups = groupTurnsBySegment(
+      [
+        segmentView("seg_0"),
+        segmentView("seg_1", { boundary: boundaryOne }),
+        segmentView("seg_2", { boundary: boundaryTwo }),
+      ],
+      [first, second, third],
+    );
+
+    const rendered = groups.flatMap((group) => [
+      ...group.leading_idle_gaps,
+      ...group.turns.flatMap((row) => [
+        ...row.preceding_idle_gaps,
+        ...row.internal_idle_gaps,
+      ]),
+    ]);
+    const renderedIds = rendered.map(
+      (gap) => `${gap.after_event_id}:${gap.before_event_id}`,
+    );
+
+    // n1 -> n2 is below the threshold. The gaps are: before seg_1, inside
+    // turn_2, before seg_2, and between the seg_2 boundary and turn_3.
+    expect(renderedIds).toEqual(["n2:n3", "n4:n5", "n5:n6", "n6:n7"]);
+    expect(new Set(renderedIds).size).toBe(renderedIds.length);
+
+    // The n2 -> n3 gap belongs to seg_1 and must not be bridged onto turn_2.
+    expect(groups[1]?.leading_idle_gaps).toHaveLength(1);
+    expect(groups[1]?.turns[0]?.idle_gap).toBeNull();
+    expect(groups[1]?.turns[0]?.internal_idle_gaps).toHaveLength(1);
+
+    // The gap after the seg_2 boundary is attached to its first turn, not to
+    // the segment itself.
+    expect(groups[2]?.leading_idle_gaps).toHaveLength(1);
+    expect(groups[2]?.turns[0]?.idle_gap).toMatchObject({
+      after_event_id: "n6",
+      before_event_id: "n7",
+    });
+  });
+
   it("normalises segment boundary attrs without inventing numbers", () => {
     const boundary = event("b1", "segment.boundary", "2026-10-20T10:00:00Z", {
       segment_id: "seg_1",
