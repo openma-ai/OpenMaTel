@@ -48,6 +48,7 @@ import { SubagentSteps } from "../components/SubagentSteps";
 import {
   EM_DASH,
   formatCount,
+  formatIdleGapLabel,
   formatSignalLabel,
   formatSignalTitle,
   turnPromptPreview,
@@ -458,6 +459,22 @@ function TurnRowComponent({
   );
   const subagents = useMemo(() => subagentSteps(turn), [turn]);
   const signals = turn.signals.length > 0 ? turn.signals : turn.summary.signals;
+  const internalIdleGaps = row.internal_idle_gaps;
+  const internalIdleMs = internalIdleGaps.reduce(
+    (total, gap) => total + gap.duration_ms,
+    0,
+  );
+  const internalIdleTitle =
+    internalIdleGaps.length === 0
+      ? undefined
+      : internalIdleGaps
+          .map(
+            (gap) =>
+              `${new Date(gap.start).toLocaleString()} · ${formatIdleGapLabel(
+                gap.duration_ms,
+              )}`,
+          )
+          .join("; ");
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-bg-surface/30">
@@ -496,7 +513,13 @@ function TurnRowComponent({
             label={`active ${formatDurationMs(turn.active_ms)}`}
             title="Active duration excludes idle gaps longer than 30 minutes"
           />
-          <Badge
+          {internalIdleGaps.length > 0 && (
+            <Badge
+              icon={<ClockIcon />}
+              label={formatIdleGapLabel(internalIdleMs)}
+              title={`Idle gaps inside this turn: ${internalIdleTitle}`}
+            />
+          )}          <Badge
             label={`tokens in ${formatTokens(turn.tokens_in)}`}
             title="Sum of context_tokens over this turn's model calls (input + cache read + cache write)"
           />
@@ -517,6 +540,17 @@ function TurnRowComponent({
       {expanded && (
         <div className="border-t border-border/60">
           <SubagentSteps steps={subagents} onOpen={onOpenChild} />
+          {internalIdleGaps.length > 0 && (
+            <div className="flex flex-col gap-1 px-3 pt-2">
+              {internalIdleGaps.map((gap) => (
+                <IdleGapMarker
+                  key={`${gap.after_event_id}:${gap.before_event_id}`}
+                  gap={gap}
+                  showStart
+                />
+              ))}
+            </div>
+          )}
           <div className="flex h-[26rem] min-h-0 flex-col">
             <div className="flex shrink-0 items-center gap-2 px-3 py-1 font-mono text-xs text-fg-subtle">
               <span>turn timeline</span>

@@ -70,6 +70,17 @@ describe("@openmatel/source-local — Claude Code", () => {
     expect(countOfKind(events, "turn.end")).toBe(1);
   });
 
+  it("closes the session at the last record, not at the file mtime", () => {
+    // A later touch of the file must not fabricate an idle gap before the end.
+    const touched = normalizeClaudeCodeFile(
+      { ...file, mtimeMs: Date.parse("2027-01-01T00:00:00.000Z") },
+      records,
+    );
+    const lastRecordTs = "2026-10-18T13:03:26.521Z";
+    expect(firstEventOfKind(touched, "session.end")?.ts).toBe(lastRecordTs);
+    expect(firstEventOfKind(touched, "turn.end")?.ts).toBe(lastRecordTs);
+  });
+
   it("describes the session", () => {
     const start = firstEventOfKind(events, "session.start");
     expect(start).toBeDefined();

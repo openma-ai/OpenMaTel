@@ -134,6 +134,17 @@ describe("@openmatel/source-local — dsh", () => {
     expect(countOfKind(events, "turn.end")).toBe(1);
   });
 
+  it("closes the session at the last record, not at the file mtime", () => {
+    // A later touch of the file must not fabricate an idle gap before the end.
+    const touched = normalizeDshFile(
+      { ...file, mtimeMs: Date.parse("2027-01-01T00:00:00.000Z") },
+      records,
+    );
+    const lastRecordTs = "2026-10-19T03:01:25.419Z";
+    expect(firstEventOfKind(touched, "session.end")?.ts).toBe(lastRecordTs);
+    expect(firstEventOfKind(touched, "turn.end")?.ts).toBe(lastRecordTs);
+  });
+
   it("describes the session", () => {
     const start = firstEventOfKind(events, "session.start");
     expect(start?.project_id).toBe("local");

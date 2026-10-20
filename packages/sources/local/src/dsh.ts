@@ -57,6 +57,8 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  laterTimestamp,
+  latestEventTimestamp,
   llmCallAttrs,
   parseJsonlText,
   parseToolArguments,
@@ -335,6 +337,8 @@ interface DshState {
   turnId?: string;
   turnOpen: boolean;
   toolCalls: ToolCallRegistry;
+  /** Latest timestamp of any record of the file, for the closing events. */
+  latestRecordTs?: string;
 }
 
 /** Create the state for one session file. */
@@ -1267,9 +1271,14 @@ function handleRecord(state: DshState, record: RawRecord): void {
 
   const type = asString(data.type) ?? "";
   const payload = isPlainObject(data.data) ? data.data : undefined;
-  const ts =
-    timestampOf(data.time, data.timestamp, data.createdAt, payload?.createdAt) ??
-    new Date(0).toISOString();
+  const recordTs = timestampOf(
+    data.time,
+    data.timestamp,
+    data.createdAt,
+    payload?.createdAt,
+  );
+  const ts = recordTs ?? new Date(0).toISOString();
+  state.latestRecordTs = laterTimestamp(state.latestRecordTs, recordTs);
 
   switch (type) {
     case "session": {
@@ -1373,7 +1382,11 @@ function handleRecord(state: DshState, record: RawRecord): void {
 
 /** Close the session: the last turn, the open tool calls and the session end. */
 function finalize(state: DshState, file: SessionFile, endLine: number): void {
-  const endTs = new Date(file.mtimeMs > 0 ? file.mtimeMs : 0).toISOString();
+  // The file mtime is not part of the trace: use the latest record timestamp
+  // so a file touched later does not invent an idle gap at the end.
+  const endTs =
+    state.latestRecordTs ??
+    new Date(file.mtimeMs > 0 ? file.mtimeMs : 0).toISOString();
   state.scope.begin(endLine);
 
   if (state.sessionStart === undefined) ensureSessionStart(state, endTs, file.path);
@@ -1385,7 +1398,11 @@ function finalize(state: DshState, file: SessionFile, endLine: number): void {
   }
 
   state.pendingTurn = undefined;
-  endTurn(state, endTs, file.path, "end_of_session");
+  const turnEndTs =
+    state.turnOpen && state.turnId !== undefined
+      ? latestEventTimestamp(state.events, state.turnId) ?? endTs
+      : endTs;
+  endTurn(state, turnEndTs, file.path, "end_of_session");
 
   for (const call of state.toolCalls.all()) {
     if (call.resolved) continue;
