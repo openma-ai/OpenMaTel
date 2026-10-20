@@ -33,6 +33,25 @@ Verify the checked-in tree without the upstream checkout (CI does this):
 node scripts/sync-oma-console.mjs --check
 ```
 
+## Vendored trace + conversation surface
+
+Part B of openmatel#40 vendors the console's actual trace renderers rather
+than reimplementing them:
+
+- `components/timeline/TimelineView.tsx` (+ `derive.ts`, `eventTime.ts`,
+  `types.ts`) — turn cards, waterfall spans, zoom auto/fit/± and the
+  “source events” JSON side panel;
+- `components/session/ManagedSessionConversation.tsx` and
+  `CanonicalSessionTurn.tsx` — the conversation transcript built on the
+  published `@openma/common/chat-ui` `AgentChatView`;
+- `components/Badge.tsx` and `components/icons.tsx` — the header chips and
+  status pill;
+- `lib/events.ts` and `lib/format.ts` — the managed event shape plus
+  `formatDuration` / `formatRelative` / `shortenId`.
+
+The OpenMaTel data adaptation lives in `packages/app/src/adapter/to-managed-events.ts`;
+no vendored trace file is modified to understand `oma.agentobs.v1`.
+
 ## Patches
 
 - `patches/0001-sidebar-sessions-only.patch` — restricts the vendored
@@ -55,6 +74,12 @@ The vendored files import these console modules; Vite aliases and TypeScript
 | `./TenantSwitcher` | `shims/components/TenantSwitcher.tsx` | OpenMaTel / Local identity slot |
 | `./UserProfile` | `shims/components/UserProfile.tsx` | Local footer + theme toggle |
 | `./CommandPalette` | `shims/components/CommandPalette.tsx` | no palette in a single-route console |
+| `../Markdown` | `shims/components/Markdown.tsx` | upstream needs `react-markdown` + `lowlight`; the shim renders through `@openma/common/chat-ui` `ChatMarkdown` |
+| `../ai-elements/tool` | `shims/components/ai-elements/tool.tsx` | upstream needs `shiki` + shadcn select/collapsible + `ai` types; the shim keeps the same `Tool`/`ToolHeader`/`ToolContent`/`ToolInput`/`ToolOutput` surface with semantic markup |
+
+Both renderer shims exist only because their upstream dependency stacks are
+not part of OpenMaTel's app; the trace timeline and conversation controller
+themselves are the unmodified upstream components.
 
 ## License
 

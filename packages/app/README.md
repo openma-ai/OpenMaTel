@@ -7,8 +7,12 @@ console shell from `@openmatel/oma-console-ui`:
 - `/sessions` is the cursor-paginated session list built on the console's
   `DataTable`, `FilterChip`, `FacetedFilter`, `Badge`, `StatusPill` and
   `EmptyState`, fed by `ObsClient`
-- `/sessions/:id` keeps the existing `@openmatel/ui` detail component inside the
-  console `Page` shell until part B replaces it
+- `/sessions/:id` is the console-shaped session detail: breadcrumb + title +
+  chips, Conversation / Timeline tabs (Timeline is the default), the vendored
+  `TimelineView` trace waterfall with its source-events side panel, and the
+  vendored `ManagedSessionConversation` transcript. `src/adapter/to-managed-events.ts`
+  adapts `oma.agentobs.v1` `AgentEvent`s to the managed event vocabulary; no
+  trace renderer is forked.
 
 ```sh
 pnpm --filter @openmatel/app build

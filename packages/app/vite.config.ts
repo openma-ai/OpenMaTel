@@ -23,6 +23,10 @@ const shimAliases = [
   { find: /^\.\/TenantSwitcher$/, replacement: `${shims}/components/TenantSwitcher.tsx` },
   { find: /^\.\/UserProfile$/, replacement: `${shims}/components/UserProfile.tsx` },
   { find: /^\.\/CommandPalette$/, replacement: `${shims}/components/CommandPalette.tsx` },
+  // The two renderers used inside the vendored conversation turn need a
+  // dependency stack OpenMaTel does not ship; see the shims for details.
+  { find: /^\.\.\/Markdown$/, replacement: `${shims}/components/Markdown.tsx` },
+  { find: /^\.\.\/ai-elements\/tool$/, replacement: `${shims}/components/ai-elements/tool.tsx` },
 ];
 
 /**

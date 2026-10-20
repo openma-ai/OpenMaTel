@@ -56,6 +56,18 @@ export const SOURCE = "claude-code";
 /** Payload format of the Claude Code connector. */
 export const FORMAT = "claude-code.jsonl";
 
+/**
+ * Model sentinel Claude Code writes for messages it generated itself
+ * (summaries, reminders, …). It is not a model the session talked to and
+ * must never become the session/llm model.
+ */
+const SYNTHETIC_MODEL = "<synthetic>";
+
+/** The real model of a message, or `undefined` for the synthetic sentinel. */
+const realModel = (model: string | undefined): string | undefined =>
+  model === undefined || model.trim().toLowerCase() === SYNTHETIC_MODEL ? undefined : model;
+
+
 /** Top level record types this normalizer knows about. */
 const KNOWN_TYPES = new Set([
   "user",
@@ -313,7 +325,7 @@ function handleAssistant(
   const message = isPlainObject(record.message) ? record.message : undefined;
   const blocks = contentBlocks(message?.content);
 
-  const model = asString(message?.model);
+  const model = realModel(asString(message?.model));
   if (model !== undefined) {
     state.model = model;
     if (state.sessionStart) state.sessionStart.attrs.model = model;

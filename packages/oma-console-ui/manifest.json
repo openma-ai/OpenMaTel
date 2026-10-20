@@ -3,7 +3,9 @@
     "repo": "https://github.com/openma-ai/open-managed-agents",
     "consoleSrc": "apps/console/src"
   },
-  "patches": ["0001-sidebar-sessions-only.patch"],
+  "patches": [
+    "0001-sidebar-sessions-only.patch"
+  ],
   "files": [
     "components/AppBreadcrumb.tsx",
     "components/AppShell.tsx",
@@ -23,6 +25,8 @@
     "components/RowContextMenu.tsx",
     "components/Skeleton.tsx",
     "components/icons.tsx",
+    "components/session/CanonicalSessionTurn.tsx",
+    "components/session/ManagedSessionConversation.tsx",
     "components/timeline/TimelineView.tsx",
     "components/timeline/derive.ts",
     "components/timeline/eventTime.ts",
