@@ -39,6 +39,19 @@ importers:
         specifier: workspace:*
         version: link:../../contract-tests
 
+  packages/stores/sqlite:
+    dependencies:
+      '@openmatel/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@openmatel/contract-tests':
+        specifier: workspace:*
+        version: link:../../contract-tests
+      vitest:
+        specifier: ^3
+        version: 3.2.7(@types/node@24.19.2)
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':
