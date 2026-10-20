@@ -10,6 +10,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./idle": {
+      "types": "./dist/idle.d.ts",
+      "default": "./dist/idle.js"
+    },
+    "./llm": {
+      "types": "./dist/llm.d.ts",
+      "default": "./dist/llm.js"
+    },
+    "./tree": {
+      "types": "./dist/tree.d.ts",
+      "default": "./dist/tree.js"
     }
   },
   "files": [
