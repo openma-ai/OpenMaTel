@@ -5,8 +5,10 @@ import * as core from "./index.js";
 describe("@openmatel/core", () => {
   it("re-exports the schema", () => {
     expect(core.SCHEMA_VERSION).toBe("oma.agentobs.v1");
-    expect(core.EVENT_KINDS).toHaveLength(27);
+    expect(core.EVENT_KINDS).toHaveLength(28);
     expect(core.EVENT_KINDS).toContain("tool.call");
+    expect(core.EVENT_KINDS).toContain("segment.boundary");
+    expect(core.FIRST_SEGMENT_ID).toBe("seg_0");
     expect(core.STEP_STATUSES).toContain("error");
   });
 
@@ -24,7 +26,16 @@ describe("@openmatel/core", () => {
   it("re-exports the tree helpers", () => {
     expect(core.SYNTHETIC_TURN_ID).toBe("turn_0");
     expect(core.buildSessionTree([]).turns).toEqual([]);
+    expect(core.buildSessionTree([]).segments).toEqual([]);
     expect(core.summarizeSession([]).session_id).toBe("");
+  });
+
+  it("re-exports the llm, signal and idle helpers", () => {
+    expect(core.contextTokens(core.emptyUsage())).toBeNull();
+    expect(core.llmCallSeries([])).toEqual([]);
+    expect(core.detectSignals([])).toEqual([]);
+    expect(core.idleGaps([])).toEqual([]);
+    expect(core.DEFAULT_IDLE_THRESHOLD_MS).toBe(30 * 60 * 1000);
   });
 
   it("re-exports the validator", () => {

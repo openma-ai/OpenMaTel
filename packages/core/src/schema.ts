@@ -20,6 +20,15 @@
 export const SCHEMA_VERSION = "oma.agentobs.v1";
 
 /**
+ * Id of the first segment of every session.
+ *
+ * A session starts in segment `seg_0`; `segment.boundary` events open the
+ * following segments. Normalizers that do not know about context boundaries
+ * yet use this id for every event (design §15.1).
+ */
+export const FIRST_SEGMENT_ID = "seg_0";
+
+/**
  * Every kind of observable agent activity.
  *
  * The list is intentionally coarse: it describes *what the agent did*, not
@@ -48,6 +57,7 @@ export type EventKind =
   | "control.retry"
   | "control.compaction"
   | "control.resume"
+  | "segment.boundary"
   | "memory.read"
   | "memory.write"
   | "skill.use"
@@ -78,6 +88,7 @@ export const EVENT_KINDS = [
   "control.retry",
   "control.compaction",
   "control.resume",
+  "segment.boundary",
   "memory.read",
   "memory.write",
   "skill.use",
@@ -148,6 +159,11 @@ export const COST_SOURCES = ["price_table", "provider", "harness"] as const sati
  *
  * The distinction is load-bearing: a session that reports no usage must never
  * be presented as "0 tokens used" (§4.5).
+ *
+ * `input_tokens` is **uncached input**: the tokens that missed the prompt
+ * cache. The full prompt size of the call is
+ * `input_tokens + cache_read_tokens + cache_write_tokens`; that is what
+ * `llm.call.attrs.context_tokens` and {@link contextTokens} report (§15.5).
  */
 export interface Usage {
   input_tokens: number | null;
@@ -226,6 +242,14 @@ export interface AgentEvent {
   project_id: string;
   /** Canonical session id (a hash of source + source session id). */
   session_id: string;
+  /**
+   * Segment of the session this event belongs to (design §15.1).
+   *
+   * The first segment is {@link FIRST_SEGMENT_ID}; a `segment.boundary` event
+   * opens the following segments. Required on every event so that the Query
+   * API can filter and aggregate by context boundary.
+   */
+  segment_id: string;
   /** Canonical turn id, when the event belongs to a turn. */
   turn_id?: string;
   /** Canonical step id, when the event is a step. */
@@ -380,14 +404,47 @@ export interface PlanUpdateAttrs {
   entries: PlanEntry[];
 }
 
-/** `llm.call` attributes. */
+/**
+ * `llm.call` attributes.
+ *
+ * `context_tokens` is the full prompt size the call saw:
+ * `usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens`
+ * (all three must be known, otherwise it is `null`). `usage.input_tokens`
+ * itself is always **uncached** input (design §15.5).
+ *
+ * The required keys are present even when the source did not report the value
+ * — unknown is `null`, never a made-up zero.
+ */
 export interface LlmCallAttrs {
-  provider?: string;
-  model?: string;
-  request_id?: string;
-  finish_reason?: string;
+  provider: string | null;
+  model: string | null;
+  context_tokens: number | null;
+  stop_reason: string | null;
+  /** Latency of the whole call, in milliseconds. */
+  latency_ms: number | null;
   /** Time to first token, in milliseconds. */
-  ttft_ms?: number;
+  ttft_ms: number | null;
+  request_id?: string | null;
+  /** Context window of the model, when the source reported it. */
+  context_window?: number | null;
+  /** Names of the fields whose values were estimated rather than reported. */
+  derived?: string[];
+}
+
+/** Why a new segment was opened (design §15.1). */
+export type SegmentBoundaryReason = "compaction" | "resume" | "fork" | "unknown";
+
+/** `segment.boundary` attributes: the node that opens a new segment. */
+export interface SegmentBoundaryAttrs {
+  reason: SegmentBoundaryReason;
+  context_tokens_before: number | null;
+  context_tokens_after: number | null;
+  tokens_removed: number | null;
+  /** Compaction summary, subject to the project capture level. */
+  summary?: string | null;
+  parent_segment_id: string | null;
+  /** `true` when the values were derived from neighbouring calls. */
+  derived?: boolean;
 }
 
 /** `permission.request` attributes. */
@@ -456,6 +513,7 @@ export interface AttrsByKind {
   "control.retry": ControlAttrs;
   "control.compaction": ControlAttrs;
   "control.resume": ControlAttrs;
+  "segment.boundary": SegmentBoundaryAttrs;
   "memory.read": MemoryAttrs;
   "memory.write": MemoryAttrs;
   "skill.use": SkillAttrs;
@@ -559,6 +617,53 @@ const validateUsage = (usage: unknown, errors: string[]): void => {
   }
 };
 
+/** Keys of {@link LlmCallAttrs} that every `llm.call` must carry. */
+const REQUIRED_LLM_ATTRS = [
+  "provider",
+  "model",
+  "context_tokens",
+  "stop_reason",
+  "latency_ms",
+  "ttft_ms",
+] as const;
+
+const validateLlmCallAttrs = (attrs: Record<string, unknown>, errors: string[]): void => {
+  const numericKeys = new Set<string>(["context_tokens", "latency_ms", "ttft_ms"]);
+
+  for (const key of REQUIRED_LLM_ATTRS) {
+    const expected = numericKeys.has(key) ? "a number or null" : "a string or null";
+    if (!Object.prototype.hasOwnProperty.call(attrs, key)) {
+      errors.push(`attrs.${key}: must be present and be ${expected}`);
+      continue;
+    }
+    const value = attrs[key];
+    if (value === null) continue;
+    if (numericKeys.has(key)) {
+      if (!isFiniteNumber(value)) errors.push(`attrs.${key}: must be ${expected}`);
+    } else if (typeof value !== "string") {
+      errors.push(`attrs.${key}: must be ${expected}`);
+    }
+  }
+
+  // The optional fields may be absent, but when they are present they must
+  // have the documented type (`undefined` is not a value a JSON producer can
+  // send, so it is not accepted as "unknown").
+  const requestId = attrs.request_id;
+  if (requestId !== undefined && requestId !== null && typeof requestId !== "string") {
+    errors.push("attrs.request_id: must be a string or null when present");
+  }
+  const contextWindow = attrs.context_window;
+  if (contextWindow !== undefined && contextWindow !== null && !isFiniteNumber(contextWindow)) {
+    errors.push("attrs.context_window: must be a number or null when present");
+  }
+  const derived = attrs.derived;
+  if (derived !== undefined) {
+    if (!Array.isArray(derived) || derived.some((field) => typeof field !== "string")) {
+      errors.push("attrs.derived: must be an array of strings when present");
+    }
+  }
+};
+
 /**
  * Validate an unknown value against the canonical event schema.
  *
@@ -583,6 +688,7 @@ export function validateEvent(event: unknown): ValidationResult {
   requireString(event, "event_id", errors);
   requireString(event, "project_id", errors);
   requireString(event, "session_id", errors);
+  requireString(event, "segment_id", errors);
   optionalString(event, "turn_id", errors);
   optionalString(event, "step_id", errors);
   optionalString(event, "parent_step_id", errors);
@@ -620,6 +726,8 @@ export function validateEvent(event: unknown): ValidationResult {
 
   if (!isPlainObject(event.attrs)) {
     errors.push("attrs: must be an object");
+  } else if (event.kind === "llm.call") {
+    validateLlmCallAttrs(event.attrs, errors);
   }
 
   if (event.content !== undefined) {

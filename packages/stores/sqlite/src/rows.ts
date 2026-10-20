@@ -66,6 +66,7 @@ export interface EventRow {
   event_id: string;
   project_id: string;
   session_id: string;
+  segment_id: string;
   turn_id: string | null;
   step_id: string | null;
   parent_step_id: string | null;
@@ -88,6 +89,7 @@ export const eventRow = (event: AgentEvent): EventRow => {
     event_id: event.event_id,
     project_id: event.project_id,
     session_id: event.session_id,
+    segment_id: event.segment_id,
     turn_id: event.turn_id ?? null,
     step_id: event.step_id ?? null,
     parent_step_id: event.parent_step_id ?? null,

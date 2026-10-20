@@ -16,22 +16,33 @@
  * Pure functions, no IO, no state.
  */
 
-import type {
-  AgentEvent,
-  EventContent,
-  EventError,
-  EventKind,
-  EventSource,
-  StepStatus,
-  Usage,
+import {
+  FIRST_SEGMENT_ID,
+  type AgentEvent,
+  type EventContent,
+  type EventError,
+  type EventKind,
+  type EventSource,
+  type StepStatus,
+  type Usage,
 } from "./schema.js";
+import { contextTokens } from "./llm.js";
+import { idleGaps } from "./idle.js";
+import { detectSignals, type Signal } from "./signals.js";
 import { sumUsage, type UsageTotal } from "./usage.js";
 
 /** Turn used for events that do not belong to a turn. */
 export const SYNTHETIC_TURN_ID = "turn_0";
 
+/** Fallback segment, for events written before `segment_id` was required. */
+export const DEFAULT_SEGMENT_ID = FIRST_SEGMENT_ID;
+
 /** Kinds that describe the session itself; they are kept on the session, not in a turn. */
-export const SESSION_LEVEL_KINDS: ReadonlySet<string> = new Set(["session.start", "session.end"]);
+export const SESSION_LEVEL_KINDS: ReadonlySet<string> = new Set([
+  "session.start",
+  "session.end",
+  "segment.boundary",
+]);
 
 /** Outcome of a whole session. */
 export type SessionStatus = StepStatus | "unknown";
@@ -56,9 +67,32 @@ export interface StepNode {
   children: StepNode[];
 }
 
+/** Aggregated facts about one turn, shown by the default turn view. */
+export interface TurnSummary {
+  step_count: number;
+  tool_call_count: number;
+  tool_error_count: number;
+  /** Number of `llm.call` steps of the turn. */
+  llm_calls: number;
+  /** Token usage of the model calls, with coverage. */
+  usage: UsageTotal;
+  /** Largest known `context_tokens` of the turn, or `null`. */
+  context_tokens_peak: number | null;
+  /** Wall-clock duration of the turn, in milliseconds. */
+  wall_ms: number | null;
+  /** Wall-clock duration minus the idle gaps inside the turn. */
+  active_ms: number | null;
+  /** Reason the turn stopped, when the source reported one. */
+  stop_reason: string | null;
+  /** Signals detected on this turn. */
+  signals: Signal[];
+}
+
 /** One turn of a session. */
 export interface TurnNode {
   turn_id: string;
+  /** Segment the turn belongs to. */
+  segment_id: string;
   /** Start timestamp of the turn. */
   ts: string | null;
   /** End timestamp of the turn, when known. */
@@ -69,6 +103,17 @@ export interface TurnNode {
   events: AgentEvent[];
   /** Root steps of the turn, in timestamp order. */
   steps: StepNode[];
+  /** Aggregated view of the turn. */
+  summary: TurnSummary;
+}
+
+/** One context segment, opened by a `segment.boundary` event. */
+export interface SegmentNode {
+  segment_id: string;
+  /** The boundary event that opened this segment (absent for `seg_0`). */
+  boundary?: AgentEvent;
+  /** Turns of this segment, in timestamp order. */
+  turns: TurnNode[];
 }
 
 /** Aggregated view of a session, used by the session list and the header. */
@@ -91,6 +136,8 @@ export interface SessionSummary {
   ended_at: string | null;
   /** Number of real turns (the synthetic `turn_0` is not counted). */
   turn_count: number;
+  /** Number of context segments. */
+  segment_count: number;
   step_count: number;
   tool_call_count: number;
   tool_error_count: number;
@@ -98,6 +145,18 @@ export interface SessionSummary {
   subagent_count: number;
   /** Token usage and its coverage. */
   usage: UsageTotal;
+  /** Number of turns per detected signal kind. */
+  signal_counts: Record<string, number>;
+  /** Largest known `context_tokens` over all model calls. */
+  context_tokens_peak: number | null;
+  /** `sum(cache_read) / sum(context_tokens)` over calls where both are known. */
+  cache_hit_ratio: number | null;
+  /**
+   * Sum of `context_tokens` over all model calls (the full prompt size,
+   * including cache). `null` when no call reported it. The UI shows this
+   * instead of the uncached `usage.total.input_tokens`.
+   */
+  tokens_in: number | null;
   /** Outcome of the session. */
   status: SessionStatus;
 }
@@ -114,8 +173,14 @@ interface Collected {
   ordered: AgentEvent[];
   turns: Map<string, TurnNode>;
   steps: Map<string, StepEntry>;
+  segments: SegmentNode[];
   summary: SessionSummary;
 }
+
+const segmentOf = (event: AgentEvent): string =>
+  typeof event.segment_id === "string" && event.segment_id !== ""
+    ? event.segment_id
+    : DEFAULT_SEGMENT_ID;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -229,6 +294,80 @@ const harnessName = (attrs: Record<string, unknown>): string | undefined => {
   return undefined;
 };
 
+const emptyTurnSummary = (): TurnSummary => ({
+  step_count: 0,
+  tool_call_count: 0,
+  tool_error_count: 0,
+  llm_calls: 0,
+  usage: sumUsage([]),
+  context_tokens_peak: null,
+  wall_ms: null,
+  active_ms: null,
+  stop_reason: null,
+  signals: [],
+});
+
+const flattenStepNodes = (steps: StepNode[]): StepNode[] =>
+  steps.flatMap((step) => [step, ...flattenStepNodes(step.children)]);
+
+const durationBetween = (start: string, end: string): number | null => {
+  const from = Date.parse(start);
+  const to = Date.parse(end);
+  if (Number.isNaN(from) || Number.isNaN(to)) return null;
+  return Math.max(0, to - from);
+};
+
+const turnBounds = (events: AgentEvent[]): { start: string; end: string } | null => {
+  let start: string | null = null;
+  let end: string | null = null;
+  for (const event of events) {
+    start = start === null ? event.ts : minTimestamp(start, event.ts);
+    const eventEnd = event.end_ts ?? event.ts;
+    end = end === null ? eventEnd : maxTimestamp(end, eventEnd);
+  }
+  return start === null || end === null ? null : { start, end };
+};
+
+const summarizeTurn = (turn: TurnNode, signals: Signal[]): TurnSummary => {
+  const nodes = flattenStepNodes(turn.steps);
+  const llmNodes = nodes.filter((node) => node.kind === "llm.call");
+  const llmUsages = llmNodes.map((node) => node.usage);
+  const turnEndUsages = turn.events
+    .filter((event) => event.kind === "turn.end")
+    .map((event) => event.usage);
+
+  const contexts = llmNodes
+    .map((node) => contextTokens(node.usage))
+    .filter((value): value is number => value !== null);
+  const contextPeak = contexts.length === 0 ? null : Math.max(...contexts);
+
+  const bounds = turnBounds(turn.events);
+  const wall = bounds === null ? null : durationBetween(bounds.start, bounds.end);
+  const idle = bounds === null ? 0 : idleGaps(turn.events).reduce((sum, gap) => sum + gap.duration_ms, 0);
+  const active = wall === null ? null : Math.max(0, wall - idle);
+
+  const turnEnd = [...turn.events].reverse().find((event) => event.kind === "turn.end");
+  const stopReason =
+    (turnEnd ? attrString(turnEnd.attrs, "stop_reason") : undefined) ??
+    (llmNodes.length > 0 ? attrString(llmNodes[llmNodes.length - 1]!.attrs, "stop_reason") : undefined) ??
+    null;
+
+  return {
+    step_count: nodes.length,
+    tool_call_count: nodes.filter((node) => node.kind === "tool.call").length,
+    tool_error_count: nodes.filter(
+      (node) => node.kind === "tool.call" && (node.status === "error" || node.error !== undefined),
+    ).length,
+    llm_calls: llmNodes.length,
+    usage: sumUsage(llmUsages.length > 0 ? llmUsages : turnEndUsages),
+    context_tokens_peak: contextPeak,
+    wall_ms: wall,
+    active_ms: active,
+    stop_reason: stopReason,
+    signals: signals.filter((signal) => signal.turn_id === turn.turn_id),
+  };
+};
+
 const collect = (events: AgentEvent[]): Collected => {
   const ordered = sortEvents(dedupeEvents(events));
 
@@ -239,15 +378,25 @@ const collect = (events: AgentEvent[]): Collected => {
     const turnId = event.turn_id ?? SYNTHETIC_TURN_ID;
     let turn = turns.get(turnId);
     if (!turn) {
-      turn = { turn_id: turnId, ts: null, end_ts: null, status: undefined, events: [], steps: [] };
+      turn = {
+        turn_id: turnId,
+        segment_id: segmentOf(event),
+        ts: null,
+        end_ts: null,
+        status: undefined,
+        events: [],
+        steps: [],
+        summary: emptyTurnSummary(),
+      };
       turns.set(turnId, turn);
     }
     return turn;
   };
 
   for (const event of ordered) {
-    // Session-level events never belong to a turn and must not create the synthetic turn.
-    if (event.turn_id === undefined && SESSION_LEVEL_KINDS.has(event.kind)) continue;
+    // Session-level events never belong to a turn and must not create the
+    // synthetic turn. A segment boundary is a node of the segment, not a turn.
+    if (SESSION_LEVEL_KINDS.has(event.kind)) continue;
     const turn = turnOf(event);
     turn.events.push(event);
 
@@ -312,7 +461,33 @@ const collect = (events: AgentEvent[]): Collected => {
     return a.ts < b.ts ? -1 : 1;
   });
 
-  return { ordered, turns, steps, summary: summarize(ordered, turns, steps) };
+  const signals = detectSignals(ordered);
+  for (const turn of orderedTurns) turn.summary = summarizeTurn(turn, signals);
+
+  // Segments are created in the order their first event appears. A boundary
+  // opens the segment named by its own `segment_id`; `seg_0` has none.
+  const segmentById = new Map<string, SegmentNode>();
+  const ensureSegment = (segmentId: string): SegmentNode => {
+    let segment = segmentById.get(segmentId);
+    if (!segment) {
+      segment = { segment_id: segmentId, turns: [] };
+      segmentById.set(segmentId, segment);
+    }
+    return segment;
+  };
+
+  for (const event of ordered) ensureSegment(segmentOf(event));
+  for (const turn of orderedTurns) ensureSegment(turn.segment_id).turns.push(turn);
+  for (const event of ordered) {
+    if (event.kind !== "segment.boundary") continue;
+    const segment = ensureSegment(segmentOf(event));
+    if (segment.boundary === undefined) segment.boundary = event;
+  }
+
+  const segments = [...segmentById.values()];
+  const summary = summarize(ordered, turns, steps, signals, segments);
+
+  return { ordered, turns, steps, segments, summary };
 };
 
 const maxTimestamp = (a: string, b: string): string => {
@@ -338,10 +513,16 @@ export function summarizeSession(events: AgentEvent[]): SessionSummary {
  * @param events - every event of one session, in any order. Duplicated
  *                 `event_id`s are collapsed (last write wins).
  */
-export function buildSessionTree(events: AgentEvent[]): { session: SessionSummary; turns: TurnNode[] } {
+export function buildSessionTree(events: AgentEvent[]): {
+  session: SessionSummary;
+  segments: SegmentNode[];
+  /** Flat list of every turn, kept for backward compatibility. */
+  turns: TurnNode[];
+} {
   const collected = collect(events);
   return {
     session: collected.summary,
+    segments: collected.segments,
     turns: [...collected.turns.values()].sort((a, b) => {
       if (a.ts === null) return b.ts === null ? 0 : 1;
       if (b.ts === null) return -1;
@@ -355,6 +536,8 @@ const summarize = (
   ordered: AgentEvent[],
   turns: Map<string, TurnNode>,
   steps: Map<string, StepEntry>,
+  signals: Signal[],
+  segments: SegmentNode[],
 ): SessionSummary => {
   const first = ordered[0];
 
@@ -397,9 +580,37 @@ const summarize = (
     }
   }
 
-  const llmUsages = ordered.filter((event) => event.kind === "llm.call").map((event) => event.usage);
+  const llmEvents = ordered.filter((event) => event.kind === "llm.call");
+  const llmUsages = llmEvents.map((event) => event.usage);
   const turnUsages = ordered.filter((event) => event.kind === "turn.end").map((event) => event.usage);
   const usage = sumUsage(llmUsages.length > 0 ? llmUsages : turnUsages);
+
+  let tokensIn: number | null = null;
+  let contextPeak: number | null = null;
+  let cacheReadSum = 0;
+  let contextSum = 0;
+  let cacheCalls = 0;
+
+  for (const event of llmEvents) {
+    const context = contextTokens(event.usage);
+    if (context === null) continue;
+    tokensIn = (tokensIn ?? 0) + context;
+    contextPeak = contextPeak === null ? context : Math.max(contextPeak, context);
+    const cacheRead = event.usage?.cache_read_tokens;
+    if (typeof cacheRead === "number" && Number.isFinite(cacheRead)) {
+      cacheReadSum += cacheRead;
+      contextSum += context;
+      cacheCalls += 1;
+    }
+  }
+
+  const cacheHitRatio =
+    cacheCalls === 0 || contextSum === 0 ? null : cacheReadSum / contextSum;
+
+  const signalCounts: Record<string, number> = {};
+  for (const signal of signals) {
+    signalCounts[signal.kind] = (signalCounts[signal.kind] ?? 0) + 1;
+  }
 
   return {
     session_id: first?.session_id ?? "",
@@ -412,11 +623,16 @@ const summarize = (
     started_at: startedAt,
     ended_at: endedAt,
     turn_count: [...turns.keys()].filter((id) => id !== SYNTHETIC_TURN_ID).length,
+    segment_count: segments.length,
     step_count: steps.size,
     tool_call_count: toolCallCount,
     tool_error_count: toolErrorCount,
     subagent_count: childSessions.size + childSessionsWithoutId,
     usage,
+    signal_counts: signalCounts,
+    context_tokens_peak: contextPeak,
+    cache_hit_ratio: cacheHitRatio,
+    tokens_in: tokensIn,
     status: sessionStatus(ordered, sessionEnd),
   };
 };

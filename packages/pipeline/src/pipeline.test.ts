@@ -11,6 +11,7 @@ const event = (event_id: string, kind: AgentEvent["kind"] = "message.user"): Age
   event_id,
   project_id: "local",
   session_id: "ss_pipeline",
+  segment_id: "seg_0",
   ts: "2026-01-01T00:00:00.000Z",
   kind,
   attrs: {},

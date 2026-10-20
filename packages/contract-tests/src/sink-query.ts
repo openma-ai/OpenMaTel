@@ -98,6 +98,39 @@ export function sinkQueryContract(
       });
     });
 
+    it("round-trips segment_id and keeps llm.call attribute nulls null", async () => {
+      await withStore(factory, async (store) => {
+        const session = fixtureSessions().find((item) => item.key === "sample");
+        if (!session) throw new Error("missing fixture session");
+
+        await store.sink.write(session.events);
+
+        const detail = await store.query.getSession(session.session_id);
+        expect(detail).not.toBeNull();
+
+        const stored = byEventId(detail?.events ?? []);
+        const original = byEventId(session.events);
+        expect(stored.map((event) => event.segment_id)).toEqual(
+          original.map((event) => event.segment_id),
+        );
+
+        const storedBoundary = stored.find((event) => event.kind === "segment.boundary");
+        expect(storedBoundary, "the segment.boundary fixture must round-trip").toBeDefined();
+        expect(storedBoundary?.segment_id).toBe("seg_1");
+        expect(storedBoundary?.attrs.reason).toBe("compaction");
+
+        const originalCall = original.find((event) => event.event_id === "ev_sample_llm_3");
+        const storedCall = stored.find((event) => event.event_id === "ev_sample_llm_3");
+        expect(storedCall?.attrs).toEqual(originalCall?.attrs);
+        expect(storedCall?.attrs.provider).toBeNull();
+        expect(storedCall?.attrs.model).toBeNull();
+        expect(storedCall?.attrs.context_tokens).toBeNull();
+        expect(storedCall?.attrs.stop_reason).toBeNull();
+        expect(storedCall?.attrs.latency_ms).toBeNull();
+        expect(storedCall?.attrs.ttft_ms).toBeNull();
+      });
+    });
+
     it("converges to the same session tree when events arrive out of order", async () => {
       const session = fixtureSessions().find((item) => item.key === "sample");
       if (!session) throw new Error("missing fixture session");
@@ -476,7 +509,14 @@ const usageZeroSession = (): FixtureSession =>
         step_id: "st_usage_zero_llm",
         end_ts: "2026-02-01T09:00:02.000Z",
         status: "ok",
-        attrs: { provider: "anthropic", model: "claude-opus" },
+        attrs: {
+          provider: "anthropic",
+          model: "claude-opus",
+          context_tokens: null,
+          stop_reason: null,
+          latency_ms: null,
+          ttft_ms: null,
+        },
         usage: {
           input_tokens: 0,
           output_tokens: 0,
@@ -502,7 +542,14 @@ const usageMissingSession = (): FixtureSession =>
         step_id: "st_usage_missing_llm",
         end_ts: "2026-02-02T09:00:02.000Z",
         status: "ok",
-        attrs: { provider: "anthropic", model: "claude-opus" },
+        attrs: {
+          provider: null,
+          model: null,
+          context_tokens: null,
+          stop_reason: null,
+          latency_ms: null,
+          ttft_ms: null,
+        },
         usage: {
           input_tokens: null,
           output_tokens: null,
@@ -657,12 +704,17 @@ const summaryFields = (summary: SessionSummary | undefined) => ({
   started_at: summary?.started_at,
   ended_at: summary?.ended_at,
   turn_count: summary?.turn_count,
+  segment_count: summary?.segment_count,
   step_count: summary?.step_count,
   tool_call_count: summary?.tool_call_count,
   tool_error_count: summary?.tool_error_count,
   subagent_count: summary?.subagent_count,
   status: summary?.status,
   usage: summary?.usage,
+  signal_counts: summary?.signal_counts,
+  context_tokens_peak: summary?.context_tokens_peak,
+  cache_hit_ratio: summary?.cache_hit_ratio,
+  tokens_in: summary?.tokens_in,
 });
 
 /** The turns of a session, whether the store builds them or not. */
@@ -692,6 +744,7 @@ const treeShape = (turns: TurnNode[]) =>
   turns
     .map((turn) => ({
       turn_id: turn.turn_id,
+      segment_id: turn.segment_id,
       status: turn.status,
       steps: shapeOfSteps(turn.steps),
     }))

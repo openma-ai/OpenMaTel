@@ -23,7 +23,7 @@ import type {
   StepStatus,
   Usage,
 } from "./schema.js";
-import type { SessionSummary, TurnNode } from "./tree.js";
+import type { SessionSummary, SegmentNode, TurnNode } from "./tree.js";
 import type { UsageTotal } from "./usage.js";
 
 /* -------------------------------------------------------------------------- */
@@ -202,6 +202,8 @@ export interface SessionDetail {
   events: AgentEvent[];
   /** The turn/step tree, when the store keeps one. */
   turns?: TurnNode[];
+  /** The segment tree, when the store keeps one. */
+  segments?: SegmentNode[];
 }
 
 /** Aggregation request, e.g. tool-error hotspots or usage per model. */

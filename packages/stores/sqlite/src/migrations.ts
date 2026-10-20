@@ -9,6 +9,9 @@
  * Migration 1 creates the whole Phase 1 schema: the events, the sessions
  * summary, the cursor table and — when the SQLite build has FTS5 — the
  * full-text index over the session title and working directory.
+ *
+ * Migration 2 adds the layered-session fields: the `segment_id` column and its
+ * index. Older rows are backfilled to `seg_0`, the first segment of a session.
  */
 
 import type { SqliteDatabase } from "./db.js";
@@ -141,8 +144,24 @@ const migration1: Migration = {
   },
 };
 
+/** Migration 2: the segment column of the layered session model (§15.1). */
+const migration2: Migration = {
+  id: 2,
+  up: (db) => {
+    const columns = db.all<{ name: string }>("PRAGMA table_info(events)");
+    if (!columns.some((column) => column.name === "segment_id")) {
+      db.exec("ALTER TABLE events ADD COLUMN segment_id TEXT;");
+    }
+    // Events written before this migration belong to the first segment.
+    db.exec("UPDATE events SET segment_id = 'seg_0' WHERE segment_id IS NULL;");
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS events_session_segment_ts ON events (session_id, segment_id, ts);",
+    );
+  },
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = [migration1];
+export const MIGRATIONS: readonly Migration[] = [migration1, migration2];
 
 /**
  * Apply the pending migrations.

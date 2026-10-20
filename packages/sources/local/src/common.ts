@@ -26,6 +26,7 @@ import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  FIRST_SEGMENT_ID,
   emptyUsage,
   eventId,
   sessionId,
@@ -571,6 +572,41 @@ export function usageFrom(parts: UsageParts, source: UsageSource = "provider"): 
   return usage;
 }
 
+/** Input of {@link llmCallAttrs}; every value is optional and becomes `null`. */
+export interface LlmCallAttrsInit {
+  provider?: string | undefined;
+  model?: string | undefined;
+  contextTokens?: number | null | undefined;
+  stopReason?: string | undefined;
+  latencyMs?: number | null | undefined;
+  ttftMs?: number | null | undefined;
+  requestId?: string | undefined;
+  contextWindow?: number | null | undefined;
+  derived?: string[] | undefined;
+}
+
+/**
+ * Build the attributes of an `llm.call`.
+ *
+ * The required keys are always present; a value the source did not map yet
+ * stays `null` (full per-source mapping lives in later issues). This keeps
+ * every local event valid under the stricter `llm.call` contract.
+ */
+export function llmCallAttrs(init: LlmCallAttrsInit = {}): Record<string, unknown> {
+  const attrs: Record<string, unknown> = {
+    provider: init.provider ?? null,
+    model: init.model ?? null,
+    context_tokens: init.contextTokens ?? null,
+    stop_reason: init.stopReason ?? null,
+    latency_ms: init.latencyMs ?? null,
+    ttft_ms: init.ttftMs ?? null,
+  };
+  if (init.requestId !== undefined) attrs.request_id = init.requestId;
+  if (init.contextWindow !== undefined) attrs.context_window = init.contextWindow;
+  if (init.derived !== undefined) attrs.derived = init.derived;
+  return attrs;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Tool kind                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -659,6 +695,8 @@ export interface EventInit {
   sub: number;
   /** What the agent did. */
   kind: EventKind;
+  /** Segment of the session; defaults to the first segment. */
+  segmentId?: string;
   /** Start of the event. */
   ts: string;
   /** End of the event, for events that have a duration. */
@@ -732,6 +770,7 @@ export class SourceEventFactory {
       event_id: this.eventIdFor(init.line, init.sub),
       project_id: PROJECT_ID,
       session_id: this.sessionId,
+      segment_id: init.segmentId ?? FIRST_SEGMENT_ID,
       ts: init.ts,
       kind: init.kind,
       attrs: init.attrs ?? {},

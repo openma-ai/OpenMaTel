@@ -6,7 +6,12 @@
  * here so that the write path and the read path can never drift apart.
  */
 
-import { summarizeSession, type AgentEvent, type SessionSummary } from "@openmatel/core";
+import {
+  FIRST_SEGMENT_ID,
+  summarizeSession,
+  type AgentEvent,
+  type SessionSummary,
+} from "@openmatel/core";
 
 import type { SqliteDatabase } from "./db.js";
 import { eventRow, sessionRow } from "./rows.js";
@@ -14,12 +19,13 @@ import { eventRow, sessionRow } from "./rows.js";
 /** The insert statement of the `events` table. */
 const INSERT_EVENT = `
 INSERT INTO events (
-  event_id, project_id, session_id, turn_id, step_id, parent_step_id,
+  event_id, project_id, session_id, segment_id, turn_id, step_id, parent_step_id,
   kind, status, ts, end_ts, source_name, attrs_json, content_json, usage_json, event_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(event_id) DO UPDATE SET
   project_id = excluded.project_id,
   session_id = excluded.session_id,
+  segment_id = excluded.segment_id,
   turn_id = excluded.turn_id,
   step_id = excluded.step_id,
   parent_step_id = excluded.parent_step_id,
@@ -77,6 +83,7 @@ export const insertEvent = (db: SqliteDatabase, event: AgentEvent): void => {
     row.event_id,
     row.project_id,
     row.session_id,
+    row.segment_id,
     row.turn_id,
     row.step_id,
     row.parent_step_id,
@@ -99,11 +106,18 @@ export const insertEvent = (db: SqliteDatabase, event: AgentEvent): void => {
  * tie breaker, so two runs always produce the same sequence.
  */
 export const loadSessionEvents = (db: SqliteDatabase, session_id: string): AgentEvent[] => {
-  const rows = db.all<{ event_json: string }>(
-    "SELECT event_json FROM events WHERE session_id = ? ORDER BY ts ASC, event_id ASC",
+  const rows = db.all<{ event_json: string; segment_id: string | null }>(
+    "SELECT event_json, segment_id FROM events WHERE session_id = ? ORDER BY ts ASC, event_id ASC",
     session_id,
   );
-  return rows.map((row) => JSON.parse(row.event_json) as AgentEvent);
+  return rows.map((row) => {
+    const event = JSON.parse(row.event_json) as AgentEvent;
+    // Rows written before migration 2 live in the first segment.
+    if (typeof event.segment_id !== "string" || event.segment_id === "") {
+      event.segment_id = row.segment_id ?? FIRST_SEGMENT_ID;
+    }
+    return event;
+  });
 };
 
 /**

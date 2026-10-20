@@ -51,6 +51,7 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  llmCallAttrs,
   parseJsonlText,
   parseToolArguments,
   planEntriesFrom,
@@ -552,9 +553,7 @@ function handleAssistantMessage(
   // left out on purpose: dsh writes them again as `tool/call` records, and
   // the call needs the arguments and the result of those records.
   const usage = isPlainObject(data.usage) ? data.usage : undefined;
-  const llmAttrs: Record<string, unknown> = {};
-  if (state.provider !== undefined) llmAttrs.provider = state.provider;
-  if (state.model !== undefined) llmAttrs.model = state.model;
+  const llmAttrs = llmCallAttrs({ provider: state.provider, model: state.model });
 
   state.events.push(
     state.factory.create({

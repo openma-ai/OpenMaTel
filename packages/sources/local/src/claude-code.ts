@@ -38,6 +38,7 @@ import {
   emptyUsage,
   endLineOf,
   isPlainObject,
+  llmCallAttrs,
   parseJsonlText,
   planEntriesFrom,
   sessionStartAttrs,
@@ -338,10 +339,8 @@ function handleAssistant(
   const details = isPlainObject(usageRecord?.output_tokens_details)
     ? usageRecord?.output_tokens_details
     : undefined;
-  const llmAttrs: Record<string, unknown> = { provider: "anthropic" };
-  if (model !== undefined) llmAttrs.model = model;
   const requestId = asString(record.requestId);
-  if (requestId !== undefined) llmAttrs.request_id = requestId;
+  const llmAttrs = llmCallAttrs({ provider: "anthropic", model, requestId });
 
   state.events.push(
     state.factory.create({

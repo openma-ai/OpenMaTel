@@ -206,8 +206,8 @@ function SessionDetailView({ sessionId }: { sessionId: string }) {
             title={`${summary.tool_error_count} of ${summary.tool_call_count} tool calls failed`}
           />
           <Badge
-            label={`tokens ${formatTokens(usage.total.input_tokens)}↓ ${formatTokens(usage.total.output_tokens)}↑ · ${formatCoverage(usage.coverage)}`}
-            title={`${usage.covered} of ${usage.calls} model calls reported usage`}
+            label={`tokens ${formatTokens(summary.tokens_in)}↓ ${formatTokens(usage.total.output_tokens)}↑ · ${formatCoverage(usage.coverage)}`}
+            title={`${usage.covered} of ${usage.calls} model calls reported usage; tokens in is the full context (including cache)`}
           />
         </div>
       </div>

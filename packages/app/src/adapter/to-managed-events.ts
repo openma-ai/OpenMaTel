@@ -320,7 +320,8 @@ export function toManagedEvents(detail: ManagedEventSource): ManagedEvent[] {
           ? undefined
           : asString(event.attrs.model);
         const usage = modelUsage(event.usage);
-        const finishReason = asString(event.attrs.finish_reason);
+        const finishReason =
+          asString(event.attrs.stop_reason) ?? asString(event.attrs.finish_reason);
         const modelStartId = `${startId}:model_start`;
 
         add("span.model_request_start", start, {

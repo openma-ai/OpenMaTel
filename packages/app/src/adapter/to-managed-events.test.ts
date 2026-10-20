@@ -22,6 +22,7 @@ const event = (
   event_id,
   project_id: "local",
   session_id: "ses_test",
+  segment_id: "seg_0",
   kind,
   ts,
   attrs: {},
@@ -88,7 +89,14 @@ describe("toManagedEvents", () => {
     const events = convert([
       event("l1", "llm.call", "2026-10-20T10:00:00.000Z", {
         end_ts: "2026-10-20T10:00:03.000Z",
-        attrs: { model: "claude-opus-5-5", finish_reason: "stop", ttft_ms: 500 },
+        attrs: {
+          provider: null,
+          model: "claude-opus-5-5",
+          context_tokens: null,
+          stop_reason: "stop",
+          latency_ms: null,
+          ttft_ms: 500,
+        },
         usage: {
           input_tokens: 10,
           output_tokens: 5,
@@ -127,7 +135,14 @@ describe("toManagedEvents", () => {
   it("omits model_usage entirely when the call reported none", () => {
     const events = convert([
       event("l1", "llm.call", "2026-10-20T10:00:00.000Z", {
-        attrs: { model: "claude-opus-5-5" },
+        attrs: {
+          provider: null,
+          model: "claude-opus-5-5",
+          context_tokens: null,
+          stop_reason: null,
+          latency_ms: null,
+          ttft_ms: null,
+        },
         usage: null,
       }),
     ]);
@@ -140,7 +155,14 @@ describe("toManagedEvents", () => {
   it("never uses <synthetic> as the model of a call", () => {
     const events = convert([
       event("l1", "llm.call", "2026-10-20T10:00:00.000Z", {
-        attrs: { model: "<synthetic>" },
+        attrs: {
+          provider: null,
+          model: "<synthetic>",
+          context_tokens: null,
+          stop_reason: null,
+          latency_ms: null,
+          ttft_ms: null,
+        },
       }),
     ]);
     for (const item of events) expect(item.model).toBeUndefined();

@@ -161,6 +161,7 @@ describe("openmatel sessions", () => {
       event_id: "ev_test_without_usage",
       project_id: "local",
       session_id: "ss_00000000000000000000000000000000",
+      segment_id: "seg_0",
       ts: "2026-01-01T00:00:00.000Z",
       kind: "session.start",
       attrs: { harness: { name: "test" } },

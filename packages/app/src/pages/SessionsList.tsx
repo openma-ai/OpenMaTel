@@ -215,7 +215,7 @@ export function SessionsListPage() {
       },
       {
         id: "tokens",
-        accessorFn: (session) => session.usage.total.input_tokens ?? 0,
+        accessorFn: (session) => session.tokens_in ?? 0,
         header: "Tokens in / out",
         size: 180,
         cell: ({ row }) => {
@@ -223,9 +223,9 @@ export function SessionsListPage() {
           return (
             <span
               className="font-mono text-xs text-fg-muted"
-              title={`${usage.covered} of ${usage.calls} calls reported usage`}
+              title={`${usage.covered} of ${usage.calls} calls reported usage; tokens in is the full context (including cache)`}
             >
-              {formatTokens(usage.total.input_tokens)} /{" "}
+              {formatTokens(row.original.tokens_in)} /{" "}
               {formatTokens(usage.total.output_tokens)}
               <span className="text-fg-subtle"> · {formatCoverage(usage.coverage)}</span>
             </span>

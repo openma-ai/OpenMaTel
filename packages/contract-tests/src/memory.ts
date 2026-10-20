@@ -94,10 +94,12 @@ export function createMemoryStore(): MemoryStore {
     getSession: async (session_id: string) => {
       const events = eventsOf(session_id);
       if (events.length === 0) return null;
+      const tree = buildSessionTree(events);
       return {
         summary: summarizeSession(events),
         events,
-        turns: buildSessionTree(events).turns,
+        turns: tree.turns,
+        segments: tree.segments,
       };
     },
     listSteps: async (q: StepQuery) => listSteps(allSessions(), q),

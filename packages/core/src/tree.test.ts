@@ -15,6 +15,7 @@ const event = (
   schema: SCHEMA_VERSION,
   project_id: "proj_1",
   session_id: "ss_1",
+  segment_id: "seg_0",
   attrs: {},
   source: { name: "claude-code", format: "jsonl" },
   ...overrides,
@@ -238,5 +239,211 @@ describe("summarizeSession", () => {
     expect(summary.step_count).toBe(0);
     expect(summary.usage.calls).toBe(0);
     expect(summary.usage.coverage).toBeNull();
+  });
+});
+
+describe("segments and turn summaries", () => {
+  const boundary = event({
+    event_id: "ev_boundary",
+    kind: "segment.boundary",
+    segment_id: "seg_1",
+    ts: "2026-01-02T03:05:00.000Z",
+    attrs: {
+      reason: "compaction",
+      context_tokens_before: 100,
+      context_tokens_after: 40,
+      tokens_removed: 60,
+      summary: "older context",
+      parent_segment_id: "seg_0",
+    },
+  });
+
+  const turn2Start = event({
+    event_id: "ev_turn2_start",
+    kind: "turn.start",
+    turn_id: "turn_2",
+    segment_id: "seg_1",
+    ts: "2026-01-02T03:06:00.000Z",
+    attrs: { trigger: "user" },
+  });
+
+  const turn2End = event({
+    event_id: "ev_turn2_end",
+    kind: "turn.end",
+    turn_id: "turn_2",
+    segment_id: "seg_1",
+    ts: "2026-01-02T03:07:00.000Z",
+    status: "ok",
+    attrs: { stop_reason: "end_turn" },
+  });
+
+  it("groups turns into segments and exposes the opening boundary", () => {
+    const { segments, turns, session } = buildSessionTree([
+      sessionStart,
+      toolCall,
+      childStep,
+      boundary,
+      turn2Start,
+      turn2End,
+    ]);
+
+    expect(segments.map((segment) => segment.segment_id)).toEqual(["seg_0", "seg_1"]);
+    expect(segments[0]?.boundary).toBeUndefined();
+    expect(segments[0]?.turns.map((turn) => turn.turn_id)).toEqual(["turn_1"]);
+    expect(segments[1]?.boundary?.event_id).toBe("ev_boundary");
+    expect(segments[1]?.turns.map((turn) => turn.turn_id)).toEqual(["turn_2"]);
+    expect(turns.map((turn) => turn.turn_id)).toEqual(["turn_1", "turn_2"]);
+    expect(session.segment_count).toBe(2);
+    expect(turns.find((turn) => turn.turn_id === "turn_2")?.segment_id).toBe("seg_1");
+  });
+
+  it("summarizes a turn: steps, tools, calls, duration, stop reason and signals", () => {
+    const failed = event({
+      event_id: "ev_failed_1",
+      kind: "tool.call",
+      turn_id: "turn_1",
+      step_id: "st_failed_1",
+      ts: "2026-01-02T03:00:05.000Z",
+      end_ts: "2026-01-02T03:00:06.000Z",
+      status: "error",
+      error: { type: "boom", message: "failed" },
+      attrs: { tool_name: "bash", tool_kind: "execute", call_id: "call_f1" },
+      content: { capture: "full", input: { text: "exit 1" } },
+    });
+    const failedAgain = event({
+      ...failed,
+      event_id: "ev_failed_2",
+      step_id: "st_failed_2",
+      ts: "2026-01-02T03:00:07.000Z",
+      end_ts: "2026-01-02T03:00:08.000Z",
+      attrs: { tool_name: "bash", tool_kind: "execute", call_id: "call_f2" },
+    });
+    const failedThird = event({
+      ...failed,
+      event_id: "ev_failed_3",
+      step_id: "st_failed_3",
+      ts: "2026-01-02T03:00:09.000Z",
+      end_ts: "2026-01-02T03:00:10.000Z",
+      attrs: { tool_name: "bash", tool_kind: "execute", call_id: "call_f3" },
+    });
+    const end = event({
+      event_id: "ev_turn_end",
+      kind: "turn.end",
+      turn_id: "turn_1",
+      ts: "2026-01-02T03:00:11.000Z",
+      status: "ok",
+      attrs: { stop_reason: "end_turn" },
+    });
+
+    const turn = turnById(
+      buildSessionTree([sessionStart, toolCall, childStep, failed, failedAgain, failedThird, end]).turns,
+      "turn_1",
+    );
+
+    expect(turn.summary.step_count).toBe(5);
+    expect(turn.summary.tool_call_count).toBe(4);
+    expect(turn.summary.tool_error_count).toBe(3);
+    expect(turn.summary.llm_calls).toBe(1);
+    expect(turn.summary.wall_ms).toBe(10_000);
+    expect(turn.summary.active_ms).toBe(10_000);
+    expect(turn.summary.stop_reason).toBe("end_turn");
+    expect(turn.summary.signals.map((signal) => signal.kind)).toContain("repeated_tool_failure");
+  });
+
+  it("subtracts idle gaps from the active duration of a turn", () => {
+    const start = event({
+      event_id: "ev_idle_start",
+      kind: "turn.start",
+      turn_id: "turn_idle",
+      ts: "2026-01-02T04:00:00.000Z",
+    });
+    const late = event({
+      event_id: "ev_idle_late",
+      kind: "message.agent",
+      turn_id: "turn_idle",
+      ts: "2026-01-02T04:45:00.000Z",
+      attrs: { role: "assistant" },
+    });
+
+    const turn = turnById(buildSessionTree([start, late]).turns, "turn_idle");
+    expect(turn.summary.wall_ms).toBe(45 * 60 * 1000);
+    expect(turn.summary.active_ms).toBe(0);
+  });
+
+  it("computes tokens_in, context peak and cache hit ratio from context sizes", () => {
+    const makeCall = (
+      id: string,
+      step: string,
+      cacheRead: number,
+      cacheWrite: number,
+      input: number,
+    ) =>
+      event({
+        event_id: id,
+        kind: "llm.call",
+        turn_id: "turn_ctx",
+        step_id: step,
+        ts: "2026-01-02T05:00:00.000Z",
+        attrs: {
+          provider: "anthropic",
+          model: "claude-opus",
+          context_tokens: null,
+          stop_reason: "end_turn",
+          latency_ms: null,
+          ttft_ms: null,
+        },
+        usage: {
+          input_tokens: input,
+          output_tokens: 5,
+          cache_read_tokens: cacheRead,
+          cache_write_tokens: cacheWrite,
+          reasoning_tokens: null,
+          source: "provider",
+        },
+      });
+
+    const summary = summarizeSession([
+      makeCall("ev_ctx_1", "st_ctx_1", 50, 10, 100),
+      makeCall("ev_ctx_2", "st_ctx_2", 30, 0, 20),
+    ]);
+
+    expect(summary.tokens_in).toBe(210);
+    expect(summary.context_tokens_peak).toBe(160);
+    expect(summary.cache_hit_ratio).toBeCloseTo(80 / 210, 10);
+    expect(summary.usage.total.input_tokens).toBe(120);
+  });
+
+  it("counts signals per kind on the session", () => {
+    const controls = [
+      event({
+        event_id: "ev_interrupt",
+        kind: "control.interrupt",
+        turn_id: "turn_1",
+        step_id: "st_interrupt",
+        ts: "2026-01-02T03:00:07.000Z",
+        attrs: { reason: "user" },
+      }),
+      event({
+        event_id: "ev_correction",
+        kind: "message.user",
+        turn_id: "turn_2",
+        segment_id: "seg_1",
+        ts: "2026-01-02T03:06:00.000Z",
+        attrs: { role: "user" },
+        content: { capture: "full", input: { text: "actually, use the other file" } },
+      }),
+    ];
+
+    const summary = summarizeSession([
+      sessionStart,
+      toolCall,
+      childStep,
+      ...controls,
+      turn2Start,
+      turn2End,
+    ]);
+
+    expect(summary.signal_counts.user_interrupt).toBe(1);
+    expect(summary.signal_counts.user_correction).toBe(1);
   });
 });
