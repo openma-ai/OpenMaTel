@@ -3,7 +3,12 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 
 import { normalizerContract } from "@openmatel/contract-tests";
-import { sessionId, validateEvent } from "@openmatel/core";
+import {
+  sessionId,
+  validateEvent,
+  type AgentEvent,
+  type RawRecord,
+} from "@openmatel/core";
 
 import {
   decompressZstdFrames,
@@ -12,18 +17,87 @@ import {
   normalizeFile as normalizeDshFile,
   readRecords as readDshRecords,
   splitZstdFrames,
+  type SessionFile,
 } from "./dsh.js";
 import { countOfKind, eventsOfKind, firstEventOfKind, makeTempHome } from "./test-support.js";
 
 const temp = makeTempHome(["dsh"]);
 
 const files = await discoverDsh(temp.home);
-const file = files[0];
+const file = files.find(
+  (candidate) => candidate.sourceSessionId === "44444444-4444-4444-8444-444444444444",
+);
 if (file === undefined) throw new Error("the dsh fixture was not found");
 const records = await readDshRecords(file);
 const events = normalizeDshFile(file, records);
 
-normalizerContract("dsh normalizer", dshNormalizer, records);
+// These fixtures carry synthetic compaction/stream records and use a name
+// that is not a dsh session log, so they stay out of `discover()` while the
+// normalizer test can still read them like any other session file.
+const streamFile: SessionFile = {
+  source: "dsh",
+  path: path.join(
+    temp.home,
+    ".dsh",
+    "sessions",
+    "--home-user-stream--",
+    "session-55555555-5555-4555-8555-555555555555",
+    "synthetic-stream.jsonl.zstd",
+  ),
+  size: 0,
+  mtimeMs: 0,
+  sourceSessionId: "55555555-5555-4555-8555-555555555555",
+};
+const streamRecords = await readDshRecords(streamFile);
+const streamEvents = normalizeDshFile(streamFile, streamRecords);
+
+const compactionFile: SessionFile = {
+  source: "dsh",
+  path: path.join(
+    temp.home,
+    ".dsh",
+    "sessions",
+    "--home-user-compaction--",
+    "session-66666666-6666-4666-8666-666666666666",
+    "synthetic-compaction.jsonl.zstd",
+  ),
+  size: 0,
+  mtimeMs: 0,
+  sourceSessionId: "66666666-6666-4666-8666-666666666666",
+};
+const compactionRecords = await readDshRecords(compactionFile);
+const compactionEvents = normalizeDshFile(compactionFile, compactionRecords);
+
+const allRecords = [
+  ...(await Promise.all(files.map((candidate) => readDshRecords(candidate)))).flat(),
+  ...streamRecords,
+  ...compactionRecords,
+];
+
+normalizerContract("dsh normalizer", dshNormalizer, allRecords);
+
+const llmCalls = (all: AgentEvent[]): AgentEvent[] => eventsOfKind(all, "llm.call");
+
+/** Build a session file for an in-memory normalization case. */
+function syntheticFile(id: string, pathName = "/tmp/dsh-synthetic"): SessionFile {
+  return {
+    source: "dsh",
+    path: `${pathName}/session-${id}/session.v4.jsonl.zstd`,
+    size: 0,
+    mtimeMs: 1700000200000,
+    sourceSessionId: id,
+  };
+}
+
+/** Turn a plain record into the shape the reader produces. */
+function rawRecord(file: SessionFile, line: number, data: Record<string, unknown>): RawRecord {
+  return {
+    source: "dsh",
+    ref: `${file.path}#L${line}`,
+    line,
+    data,
+  };
+}
 
 describe("@openmatel/source-local — dsh", () => {
   it("finds the session file of the fixture", () => {
@@ -32,6 +106,8 @@ describe("@openmatel/source-local — dsh", () => {
     expect(file.sourceSessionId).toBe("44444444-4444-4444-8444-444444444444");
     expect(file.path).toContain(path.join(".dsh", "sessions"));
     expect(file.path).toMatch(/session\.v4\.jsonl\.zstd$/);
+    expect(streamFile.sourceSessionId).toBe("55555555-5555-4555-8555-555555555555");
+    expect(compactionFile.sourceSessionId).toBe("66666666-6666-4666-8666-666666666666");
   });
 
   it("decodes the file, which is a series of zstd frames", () => {
@@ -74,6 +150,8 @@ describe("@openmatel/source-local — dsh", () => {
   it("does not report the bookkeeping of the runtime as unknown", () => {
     // The delivery records of the log are noise, not an unknown format.
     expect(countOfKind(events, "raw.unknown")).toBe(0);
+    expect(countOfKind(streamEvents, "raw.unknown")).toBe(0);
+    expect(countOfKind(compactionEvents, "raw.unknown")).toBe(0);
   });
 
   it("emits at least one tool call, with its result", () => {
@@ -101,7 +179,7 @@ describe("@openmatel/source-local — dsh", () => {
   });
 
   it("maps the token counters of the model, keeping a missing count missing", () => {
-    const calls = eventsOfKind(events, "llm.call");
+    const calls = llmCalls(events);
     expect(calls.length).toBeGreaterThanOrEqual(1);
 
     const usage = calls[0].usage;
@@ -126,9 +204,284 @@ describe("@openmatel/source-local — dsh", () => {
   });
 
   it("produces valid canonical events", () => {
-    for (const event of events) {
+    for (const event of [...events, ...streamEvents, ...compactionEvents]) {
       const result = validateEvent(event);
       expect(result.ok, result.ok ? "" : result.errors.join("; ")).toBe(true);
     }
+  });
+
+  it("puts a segment id on every event", () => {
+    for (const event of [...events, ...streamEvents, ...compactionEvents]) {
+      expect(event.segment_id).toMatch(/^seg_\d+$/);
+    }
+  });
+
+  it("emits exactly one llm.call per model call and keeps retries as control events", () => {
+    expect(llmCalls(streamEvents)).toHaveLength(2);
+    expect(countOfKind(streamEvents, "control.retry")).toBe(1);
+    expect(countOfKind(streamEvents, "turn.start")).toBe(1);
+    expect(countOfKind(streamEvents, "turn.end")).toBe(1);
+  });
+
+  it("derives latency and TTFT from the stream and marks them as derived", () => {
+    const [first, second] = llmCalls(streamEvents);
+    expect(first?.attrs).toMatchObject({
+      provider: "synthetic-provider",
+      model: "synthetic-model",
+      context_tokens: 150,
+      stop_reason: "stop",
+      latency_ms: 500,
+      ttft_ms: 150,
+      request_id: null,
+      context_window: 128000,
+      derived: ["latency_ms", "ttft_ms"],
+    });
+    expect(second?.attrs).toMatchObject({
+      provider: "synthetic-provider",
+      model: "synthetic-model",
+      context_tokens: null,
+      stop_reason: "tool-calls",
+      latency_ms: 500,
+      ttft_ms: 150,
+      request_id: null,
+      context_window: 128000,
+      derived: ["latency_ms", "ttft_ms"],
+    });
+  });
+
+  it("keeps every unknown usage field null instead of turning it into zero", () => {
+    const [, second] = llmCalls(streamEvents);
+    expect(second?.usage).toMatchObject({
+      input_tokens: 200,
+      output_tokens: 30,
+      cache_read_tokens: 100,
+      cache_write_tokens: null,
+      reasoning_tokens: null,
+      source: "harness",
+    });
+    // The missing cache bucket makes the full context size unknown as well.
+    expect(second?.attrs.context_tokens).toBeNull();
+
+    for (const call of llmCalls([...events, ...streamEvents, ...compactionEvents])) {
+      expect(call.attrs).toHaveProperty("request_id");
+      expect(call.attrs).toHaveProperty("context_window");
+      expect(Array.isArray(call.attrs.derived)).toBe(true);
+      for (const field of [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+      ] as const) {
+        const value = call.usage?.[field];
+        expect(value === null || typeof value === "number").toBe(true);
+      }
+    }
+  });
+
+  it("keeps latency, TTFT and stop reason null when the source did not provide them", () => {
+    const first = llmCalls(events)[0];
+    expect(first?.attrs.stop_reason).toBeNull();
+    expect(first?.attrs.latency_ms).toBeNull();
+    expect(first?.attrs.ttft_ms).toBeNull();
+    expect(first?.attrs.request_id).toBeNull();
+    expect(first?.attrs.context_window).toBe(1000000);
+    expect(first?.attrs.context_tokens).toBe(10841);
+    expect(first?.attrs.derived).toEqual([]);
+  });
+
+  it("opens a compaction segment with before/after/tokens_removed/summary", () => {
+    const boundaries = eventsOfKind(compactionEvents, "segment.boundary");
+    expect(boundaries).toHaveLength(1);
+
+    const boundary = boundaries[0];
+    expect(boundary.segment_id).toBe("seg_1");
+    expect(boundary.attrs).toMatchObject({
+      reason: "compaction",
+      context_tokens_before: 1000,
+      context_tokens_after: 150,
+      tokens_removed: 850,
+      summary: "Synthetic summary of the earlier synthetic context.",
+      parent_segment_id: "seg_0",
+      derived: true,
+    });
+    expect(boundary.content?.output?.text).toBe(
+      "Synthetic summary of the earlier synthetic context.",
+    );
+
+    const calls = llmCalls(compactionEvents);
+    expect(calls.map((call) => call.segment_id)).toEqual(["seg_0", "seg_1"]);
+    expect(calls.map((call) => call.attrs.context_tokens)).toEqual([1000, 150]);
+  });
+
+  it("maps request/header resume to a segment boundary", () => {
+    const state = syntheticFile("77777777-7777-4777-8777-777777777777");
+    const message = (time: number, input: number, output: number): Record<string, unknown> => ({
+      type: "assistant/message",
+      time,
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Synthetic resume answer." }],
+          source: {
+            kind: "model",
+            provider: "synthetic-provider",
+            model: "synthetic-model",
+          },
+        },
+        usage: {
+          inputTokens: input,
+          outputTokens: output,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+        stream: [
+          {
+            type: "chunk",
+            time,
+            chunk: { type: "finish", reason: { kind: "stop" } },
+          },
+        ],
+      },
+    });
+
+    const records: RawRecord[] = [
+      rawRecord(state, 1, {
+        type: "session",
+        version: 4,
+        id: `session-${state.sourceSessionId}`,
+        createdAt: 1700000200000,
+        cwd: "/home/user/resume-project",
+        isSeeded: false,
+        delegationDepth: 0,
+      }),
+      rawRecord(state, 2, { type: "turn/start", seq: 0, time: 1700000201000, data: { turn: 1 } }),
+      rawRecord(state, 3, {
+        type: "user/message",
+        seq: 1,
+        time: 1700000201001,
+        data: {
+          content: [{ type: "text", text: "Synthetic resume prompt." }],
+          source: { kind: "user" },
+          role: "user",
+        },
+      }),
+      rawRecord(state, 4, message(1700000201600, 100, 10)),
+      rawRecord(state, 5, {
+        type: "request/header",
+        seq: 3,
+        time: 1700000201700,
+        data: {
+          header: {
+            config: { provider: "synthetic-provider", model: "synthetic-model" },
+          },
+          reason: "resume",
+        },
+      }),
+      rawRecord(state, 6, message(1700000202600, 40, 5)),
+      rawRecord(state, 7, {
+        type: "turn/end",
+        seq: 5,
+        time: 1700000202601,
+        data: { turn: 1, reason: { kind: "completed" } },
+      }),
+    ];
+
+    const normalized = normalizeDshFile(state, records);
+    const boundaries = eventsOfKind(normalized, "segment.boundary");
+    expect(boundaries).toHaveLength(1);
+    expect(boundaries[0].attrs).toMatchObject({
+      reason: "resume",
+      context_tokens_before: 100,
+      context_tokens_after: 40,
+      tokens_removed: 60,
+      parent_segment_id: "seg_0",
+      derived: true,
+    });
+    expect(llmCalls(normalized).map((call) => call.segment_id)).toEqual(["seg_0", "seg_1"]);
+  });
+
+  it("maps an inherited session/end-seed marker to a fork boundary", () => {
+    const state = syntheticFile("88888888-8888-4888-8888-888888888888");
+    const records: RawRecord[] = [
+      rawRecord(state, 1, {
+        type: "session",
+        version: 4,
+        id: `session-${state.sourceSessionId}`,
+        createdAt: 1700000300000,
+        cwd: "/home/user/fork-project",
+        isSeeded: true,
+        parentSession: "session-synthetic-parent",
+        delegationDepth: 0,
+      }),
+      rawRecord(state, 2, {
+        type: "session/end-seed",
+        seq: 0,
+        time: 1700000301000,
+        data: { inherited: true },
+      }),
+      rawRecord(state, 3, { type: "turn/start", seq: 1, time: 1700000302000, data: { turn: 1 } }),
+      rawRecord(state, 4, {
+        type: "user/message",
+        seq: 2,
+        time: 1700000302001,
+        data: {
+          content: [{ type: "text", text: "Synthetic fork prompt." }],
+          source: { kind: "user" },
+          role: "user",
+        },
+      }),
+      rawRecord(state, 5, {
+        type: "assistant/message",
+        seq: 3,
+        time: 1700000302500,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Synthetic fork answer." }],
+            source: {
+              kind: "model",
+              provider: "synthetic-provider",
+              model: "synthetic-model",
+            },
+          },
+          usage: {
+            inputTokens: 30,
+            outputTokens: 3,
+            cacheReadTokens: 10,
+            cacheWriteTokens: 0,
+          },
+          stream: [
+            {
+              type: "chunk",
+              time: 1700000302500,
+              chunk: { type: "finish", reason: { kind: "stop" } },
+            },
+          ],
+        },
+      }),
+      rawRecord(state, 6, {
+        type: "turn/end",
+        seq: 4,
+        time: 1700000302501,
+        data: { turn: 1, reason: { kind: "completed" } },
+      }),
+    ];
+
+    const normalized = normalizeDshFile(state, records);
+    const boundaries = eventsOfKind(normalized, "segment.boundary");
+    expect(boundaries).toHaveLength(1);
+    expect(boundaries[0].attrs).toMatchObject({
+      reason: "fork",
+      context_tokens_before: null,
+      context_tokens_after: 40,
+      parent_segment_id: "seg_0",
+      derived: true,
+    });
+    expect(llmCalls(normalized)[0]?.segment_id).toBe("seg_1");
   });
 });
