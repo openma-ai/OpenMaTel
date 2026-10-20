@@ -1,0 +1,50 @@
+{
+  "name": "@openmatel/oma-console-ui",
+  "version": "0.1.0",
+  "description": "Vendored Open Managed Agents console shell, list primitives and trace components, adapted for OpenMaTel.",
+  "private": false,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./vendor/*": "./vendor/*",
+    "./shims/*": "./shims/*",
+    "./manifest.json": "./manifest.json"
+  },
+  "files": [
+    "vendor",
+    "shims",
+    "patches",
+    "manifest.json",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/react-table": "^8.21.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "highlight.js": "^11.11.1",
+    "lucide-react": "^1.16.0",
+    "radix-ui": "^1.4.3",
+    "react-router": "^7.5.0",
+    "tailwind-merge": "^3.6.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@openma/common": "0.11.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

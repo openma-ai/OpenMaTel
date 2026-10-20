@@ -1,0 +1,100 @@
+--- a/components/AppSidebar.tsx
++++ b/components/AppSidebar.tsx
+@@ -1,29 +1,10 @@
+-import { Button } from "@/components/ui/button";
+ import type { ComponentType } from "react";
+-import { SearchIcon, UsersIcon } from "lucide-react";
+ import { NavLink, useLocation } from "react-router";
+ import { useScrollFade } from "@/hooks/useScrollFade";
+ 
+-import { openCommandPalette } from "./CommandPalette";
+ import { TenantSwitcher } from "./TenantSwitcher";
+ import { UserProfile } from "./UserProfile";
+-import {
+-  AgentIcon,
+-  ApiKeysIcon,
+-  RuntimesIcon,
+-  DashboardIcon,
+-  EnvIcon,
+-  FeishuIcon,
+-  FilesIcon,
+-  GitHubIcon,
+-  LinearIcon,
+-  MemoryIcon,
+-  ModelCardsIcon,
+-  SessionsIcon,
+-  SkillsIcon,
+-  SlackIcon,
+-  VaultIcon,
+-} from "./icons";
++import { SessionsIcon } from "./icons";
+ import { consolePlugins } from "../plugins/registry";
+ import { useI18n } from "../i18n";
+ 
+@@ -40,47 +21,11 @@
+ }
+ 
+ function useNavGroups(): NavGroup[] {
+-  const { t, locale } = useI18n();
++  const { t } = useI18n();
+   return [
+     {
+-      label: t.nav.overview,
+-      items: [{ to: "/", label: t.nav.dashboard, icon: DashboardIcon, end: true }],
+-    },
+-    {
+       label: t.nav.managedAgents,
+-      items: [
+-        { to: "/agents", label: t.nav.agents, icon: AgentIcon },
+-        { to: "/sessions", label: t.nav.sessions, icon: SessionsIcon },
+-        { to: "/files", label: t.nav.files, icon: FilesIcon },
+-        { to: "/evals", label: t.nav.evalRuns, icon: SessionsIcon },
+-      ],
+-    },
+-    {
+-      label: t.nav.infrastructure,
+-      items: [
+-        { to: "/environments", label: t.nav.environments, icon: EnvIcon },
+-        { to: "/vaults", label: t.nav.credentialVaults, icon: VaultIcon },
+-      ],
+-    },
+-    {
+-      label: t.nav.configuration,
+-      items: [
+-        { to: "/skills", label: t.nav.skills, icon: SkillsIcon },
+-        { to: "/memory", label: t.nav.memoryStores, icon: MemoryIcon },
+-        { to: "/model-cards", label: t.nav.modelCards, icon: ModelCardsIcon },
+-        { to: "/members", label: locale === "zh-CN" ? "成员" : "Members", icon: UsersIcon },
+-        { to: "/api-keys", label: t.nav.apiKeys, icon: ApiKeysIcon },
+-        { to: "/runtimes", label: t.nav.localRuntimes, icon: RuntimesIcon },
+-      ],
+-    },
+-    {
+-      label: t.nav.integrations,
+-      items: [
+-        { to: "/integrations/linear", label: "Linear", icon: LinearIcon },
+-        { to: "/integrations/github", label: "GitHub", icon: GitHubIcon },
+-        { to: "/integrations/slack", label: "Slack", icon: SlackIcon },
+-        { to: "/integrations/feishu", label: "Feishu", icon: FeishuIcon },
+-      ],
++      items: [{ to: "/sessions", label: t.nav.sessions, icon: SessionsIcon }],
+     },
+   ];
+ }
+@@ -98,16 +43,6 @@
+     <aside className="console-sidebar" aria-label="Workspace navigation" data-sidebar="sidebar">
+       <div className="console-sidebar-tenant">
+         <TenantSwitcher />
+-        <Button
+-          variant="ghost"
+-          type="button"
+-          className="console-sidebar-search"
+-          aria-label={t.command.title}
+-          data-sidebar-search
+-          onClick={openCommandPalette}
+-        >
+-          <SearchIcon className="size-4" aria-hidden="true" />
+-        </Button>
+       </div>
+ 
+       <nav ref={navFade.ref} className={`console-sidebar-nav console-scroll-fade ${navFade.className}`} aria-label="Console">

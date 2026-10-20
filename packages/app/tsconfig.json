@@ -1,14 +1,27 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist-types",
-    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": [],
-    "resolveJsonModule": true
+    "types": ["vite/client"],
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../oma-console-ui/vendor/*"],
+      "@console-shims/*": ["../oma-console-ui/shims/*"],
+      "@openmatel/oma-console-ui/*": ["../oma-console-ui/*"]
+    },
+    "rootDirs": ["src", "../oma-console-ui/vendor", "../oma-console-ui/shims"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "../oma-console-ui/vendor/**/*.ts",
+    "../oma-console-ui/vendor/**/*.tsx",
+    "../oma-console-ui/shims/**/*.ts",
+    "../oma-console-ui/shims/**/*.tsx"
+  ],
   "references": [{ "path": "../ui" }]
 }

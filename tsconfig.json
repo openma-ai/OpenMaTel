@@ -48,6 +48,9 @@
       "path": "./packages/ui"
     },
     {
+      "path": "./packages/oma-console-ui"
+    },
+    {
       "path": "./packages/app"
     },
     {

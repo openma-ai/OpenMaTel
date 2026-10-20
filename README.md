@@ -107,6 +107,28 @@ pnpm test       # vitest run
 
 `pnpm lint` enforces the architecture rules mechanically: `packages/core` must have zero dependencies, no package may pull in OpenMA internals, and the UI must not depend on a store implementation.
 
+## Third-party code
+
+The web console reuses the actual Open Managed Agents console UI rather than a
+lookalike. `packages/oma-console-ui/vendor/` contains files copied verbatim
+from [`openma-ai/open-managed-agents`](https://github.com/openma-ai/open-managed-agents)
+at commit `40964db` (`apps/console/src`) — the app shell, sidebar, breadcrumb,
+page/list/table primitives, filter chips, empty/badge/skeleton/logo components,
+trace timeline, hooks, styles and the console `index.css`. The package is
+Apache-2.0; see [`packages/oma-console-ui/LICENSE`](./packages/oma-console-ui/LICENSE),
+[`NOTICE`](./packages/oma-console-ui/NOTICE) and
+[`vendor/PROVENANCE.md`](./packages/oma-console-ui/vendor/PROVENANCE.md) for the
+source commit and per-file SHA-256.
+
+Local adaptations are limited to `packages/oma-console-ui/patches/` (one minimal
+sidebar patch) and the shims that replace OpenMA account/tenant/plugin modules.
+The published Apache-2.0 `@openma/common` package is used as a **devDependency**
+of `packages/app` and `packages/oma-console-ui` for its brand tokens and
+chat-ui styles, which the vendored `index.css` imports.
+
+The root license remains MIT; the vendored console package keeps its own
+Apache-2.0 license and NOTICE.
+
 ## License
 
 [MIT](./LICENSE) © 2026 openma-ai contributors

@@ -1,0 +1,10 @@
+/*
+ * The console's stylesheet is vendored verbatim. This entry point only adds
+ * Tailwind source roots for the vendored TSX and the local shims, which live
+ * outside Vite's default app root.
+ */
+@import "../../oma-console-ui/vendor/index.css";
+
+@source ".";
+@source "../../oma-console-ui/vendor";
+@source "../../oma-console-ui/shims";
