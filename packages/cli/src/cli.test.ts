@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,10 +11,12 @@ import {
   createMemoryIO,
   formatTokens,
   openStore,
+  resolveUiDir,
   runIndex,
   runSessions,
   runShow,
   runSources,
+  startServe,
   type IndexResult,
   type SourceIndexStats,
 } from "./index.js";
@@ -240,5 +242,60 @@ describe("openmatel sources", () => {
       expect(entry.status).toBe("found");
     }
     expect(io.stdoutText).toContain("claude-code");
+  });
+});
+
+/** Use the real built assets when available, or a minimal fixture otherwise. */
+function uiAssetsDir(): string {
+  const resolved = resolveUiDir();
+  if (existsSync(path.join(resolved, "index.html"))) return resolved;
+  const directory = tempDirectory();
+  writeFileSync(
+    path.join(directory, "index.html"),
+    "<!doctype html><html><head><title>OpenMaTel</title></head><body><div id=\"root\"></div></body></html>",
+    "utf8",
+  );
+  return directory;
+}
+
+describe("openmatel serve", () => {
+  it("serves the UI and the Query API with a per-run token", async () => {
+    const { dataDir } = await indexedFixture();
+    const handle = await startServe({
+      dataDir,
+      port: 0,
+      host: "127.0.0.1",
+      open: false,
+      handleSignals: false,
+      staticDir: uiAssetsDir(),
+    });
+
+    try {
+      const url = new URL(handle.url);
+      expect(url.searchParams.get("token")).toBe(handle.token);
+      expect(handle.url.startsWith(`http://127.0.0.1:${handle.port}/?token=`)).toBe(true);
+
+      const origin = url.origin;
+      const auth = { authorization: `Bearer ${handle.token}` };
+
+      const page = await fetch(`${origin}/`, { headers: auth });
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-type")).toContain("text/html");
+      expect(await page.text()).toContain("OpenMaTel");
+
+      const sessions = await fetch(`${origin}/v1/query/sessions`, { headers: auth });
+      expect(sessions.status).toBe(200);
+      const body = (await sessions.json()) as { items: Array<{ source: string }> };
+      expect(body.items).toHaveLength(4);
+      expect(new Set(body.items.map((item) => item.source))).toEqual(
+        new Set(["claude-code", "codex", "dsh", "pi"]),
+      );
+
+      const anonymous = await fetch(`${origin}/v1/query/sessions`);
+      expect(anonymous.status).toBe(401);
+      expect(anonymous.headers.get("www-authenticate")).toBe("Bearer");
+    } finally {
+      await handle.close();
+    }
   });
 });

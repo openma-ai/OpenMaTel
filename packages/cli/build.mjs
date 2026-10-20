@@ -7,7 +7,7 @@
  * `bin` entry.
  */
 
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { fileURLToPath } from "node:url";
 
@@ -48,3 +48,16 @@ await build({
 });
 
 chmodSync(new URL("./dist/openmatel.mjs", import.meta.url), 0o755);
+
+// Ship the standalone SPA with the CLI. `pnpm build` orders @openmatel/app
+// before this package (it is a workspace dev dependency), so its dist is
+// already there; the copied tree is served from `dist/ui` at runtime.
+const appDist = fileURLToPath(new URL("../app/dist/", import.meta.url));
+const uiDist = fileURLToPath(new URL("./dist/ui/", import.meta.url));
+if (!existsSync(new URL("../app/dist/index.html", import.meta.url))) {
+  throw new Error(
+    "packages/app/dist/index.html is missing — build @openmatel/app before the CLI (pnpm build does this)",
+  );
+}
+rmSync(uiDist, { recursive: true, force: true });
+cpSync(appDist, uiDist, { recursive: true });

@@ -18,9 +18,11 @@
     "build": "node build.mjs"
   },
   "devDependencies": {
+    "@openmatel/app": "workspace:*",
     "@openmatel/bus-inproc": "workspace:*",
     "@openmatel/core": "workspace:*",
     "@openmatel/pipeline": "workspace:*",
+    "@openmatel/server": "workspace:*",
     "@openmatel/source-local": "workspace:*",
     "@openmatel/store-sqlite": "workspace:*",
     "esbuild": "^0.28.2",
