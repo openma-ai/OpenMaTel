@@ -45,6 +45,7 @@ import {
   truncateText,
 } from "./format.js";
 import { err, out, processIO, type CommandIO } from "./io.js";
+import { openBrowser, startServe, type ServeHandle } from "./serve.js";
 import { databasePath, openStore } from "./store.js";
 import { VERSION } from "./version.js";
 
@@ -101,6 +102,24 @@ export interface ShowOptions {
 /** Options of `openmatel sources`. */
 export interface SourcesOptions {
   home?: string;
+}
+
+/** Options of `openmatel serve` and of the no-argument default command. */
+export interface ServeOptions {
+  /** First port to try; the next ten ports are used when it is busy. */
+  port?: number;
+  /** Interface to bind. */
+  host?: string;
+  /** Open the browser (default `true`). */
+  open?: boolean;
+  /** Index local sessions before serving (default `true`). */
+  index?: boolean;
+  /** Data directory override. */
+  dataDir?: string;
+  /** Home directory to scan when indexing. */
+  home?: string;
+  /** Sources to index when indexing. */
+  sources?: readonly string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -364,6 +383,70 @@ export function parseSourcesArgs(args: readonly string[]): SourcesOptions {
       continue;
     }
     throw new UsageError(`unknown option "--${option.name}" for sources`);
+  }
+  return options;
+}
+
+/** Parse the arguments of `serve`. */
+export function parseServeArgs(args: readonly string[]): ServeOptions {
+  const options: ServeOptions = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (!argument.startsWith("--")) {
+      throw new UsageError(`unexpected argument "${argument}" for serve`);
+    }
+    const option = parseLongOption(argument);
+    switch (option.name) {
+      case "port": {
+        const { value, next } = optionValue(args, index, option);
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 0 || port > 65535) {
+          throw new UsageError(`--port must be an integer between 0 and 65535 (got "${value}")`);
+        }
+        options.port = port;
+        index = next;
+        break;
+      }
+      case "host": {
+        const { value, next } = optionValue(args, index, option);
+        if (value.trim() === "") throw new UsageError("--host must not be empty");
+        options.host = value;
+        index = next;
+        break;
+      }
+      case "no-open":
+        if (option.inlineValue !== undefined) {
+          throw new UsageError("--no-open does not take a value");
+        }
+        options.open = false;
+        break;
+      case "no-index":
+        if (option.inlineValue !== undefined) {
+          throw new UsageError("--no-index does not take a value");
+        }
+        options.index = false;
+        break;
+      case "data": {
+        const { value, next } = optionValue(args, index, option);
+        options.dataDir = value;
+        index = next;
+        break;
+      }
+      case "home": {
+        const { value, next } = optionValue(args, index, option);
+        options.home = value;
+        index = next;
+        break;
+      }
+      case "sources": {
+        const { value, next } = optionValue(args, index, option);
+        options.sources = parseSources(value);
+        index = next;
+        break;
+      }
+      default:
+        throw new UsageError(`unknown option "--${option.name}" for serve`);
+    }
   }
   return options;
 }
@@ -767,6 +850,48 @@ export async function runSources(
 }
 
 /* -------------------------------------------------------------------------- */
+/* serve                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Index (unless disabled) and serve the local web UI.
+ *
+ * The URL is printed before the browser is opened, because the token in it is
+ * the only way into the UI. Ctrl-C is handled by the server handle.
+ */
+export async function runServe(
+  options: ServeOptions = {},
+  io: CommandIO = processIO,
+): Promise<ServeHandle> {
+  const dataDir = resolveDataDir(options.dataDir);
+
+  if (options.index !== false) {
+    await runIndex(
+      {
+        ...(options.home !== undefined ? { home: options.home } : {}),
+        ...(options.sources !== undefined ? { sources: options.sources } : {}),
+        dataDir,
+      },
+      io,
+    );
+  }
+
+  const handle = await startServe({
+    dataDir,
+    ...(options.host !== undefined ? { host: options.host } : {}),
+    ...(options.port !== undefined ? { port: options.port } : {}),
+    open: false,
+  });
+
+  out(io, `OpenMaTel ${VERSION} — local mode`);
+  out(io, `  ${handle.url}`);
+  out(io, `  listening on ${handle.host}:${handle.port}; press Ctrl-C to stop`);
+
+  if (options.open !== false) openBrowser(handle.url);
+  return handle;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Entry point                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -774,7 +899,8 @@ export async function runSources(
 export const HELP_TEXT = `openmatel ${VERSION} — local agent observability, zero services
 
 Usage:
-  openmatel                              Index, then list the 20 newest sessions
+  openmatel                              Index, then serve the web UI and open it
+  openmatel serve [options]              Index (unless --no-index) and serve the web UI
   openmatel index [options]              Discover and index local sessions
   openmatel sessions [options]           List indexed sessions
   openmatel show <session-id-prefix>     Show one session and its step timeline
@@ -800,6 +926,15 @@ show options:
 sources options:
   --home <dir>       Home directory to scan (default: ~)
 
+serve options:
+  --port <n>         First port to try (default: 4319; the next 10 are tried when busy)
+  --host <addr>      Interface to bind (default: 127.0.0.1)
+  --no-open          Do not open the browser
+  --no-index         Serve the existing database without indexing first
+  --data <dir>       Data directory (default: $OPENMATEL_HOME or ~/.openmatel)
+  --home <dir>       Home directory to scan when indexing (default: ~)
+  --sources <list>   Sources to index: ${ALL_SOURCES.join(", ")} (default: all)
+
 Environment:
   OPENMATEL_HOME     Default data directory
 `;
@@ -818,8 +953,7 @@ export async function runCli(
     const [command, ...rest] = argv;
 
     if (command === undefined) {
-      await runIndex({}, io);
-      await runSessions({ limit: 20 }, io);
+      await runServe({}, io);
       return 0;
     }
 
@@ -835,7 +969,9 @@ export async function runCli(
       throw new UsageError("--json is an option of a command, not a global option");
     }
     if (command.startsWith("-")) {
-      throw new UsageError(`unknown option "${command}"`);
+      // Bare options (e.g. `openmatel --no-open --port 5000`) apply to the default serve command.
+      await runServe(parseServeArgs(argv), io);
+      return 0;
     }
 
     switch (command) {
@@ -845,6 +981,13 @@ export async function runCli(
           return 0;
         }
         await runIndex(parseIndexArgs(rest), io);
+        return 0;
+      case "serve":
+        if (rest.includes("--help") || rest.includes("-h")) {
+          out(io, HELP_TEXT);
+          return 0;
+        }
+        await runServe(parseServeArgs(rest), io);
         return 0;
       case "sessions":
         if (rest.includes("--help") || rest.includes("-h")) {

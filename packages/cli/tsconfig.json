@@ -25,6 +25,9 @@
     },
     {
       "path": "../pipeline"
+    },
+    {
+      "path": "../server"
     }
   ]
 }
