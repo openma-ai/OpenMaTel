@@ -110,6 +110,14 @@ const isWorkspaceDependency = (dep, workspaceNames) =>
 const isOpenmaInternal = (name) =>
   name.includes("openma") && name !== "openmatel" && !name.startsWith(OPENMATEL_SCOPE);
 
+// `@openma/common` is the published Apache-2.0 CSS/brand package that carries
+// the console's design tokens and chat-ui styles. It is allowed only as a
+// build-time (dev) dependency of the two console-facing packages.
+const ALLOWED_OPENMA_DEV_DEPS = new Map([
+  ["packages/app", new Set(["@openma/common"])],
+  ["packages/oma-console-ui", new Set(["@openma/common"])],
+]);
+
 function main() {
   const problems = [];
 
@@ -155,12 +163,19 @@ function main() {
     }
 
     for (const dep of deps) {
-      // (b) No OpenMA internals, in any dependency field.
+      // (b) No OpenMA internals, in any dependency field. The sole exception
+      // is the published @openma/common CSS package as a devDependency of the
+      // console-facing packages.
       if (isOpenmaInternal(dep.name)) {
-        problems.push(
-          `${pkg.dir}: must not depend on "${dep.name}" (${dep.field}) — ` +
-            `OpenMA internals are not allowed, use ${OPENMATEL_SCOPE}* packages instead`,
-        );
+        const allowedCssDep =
+          dep.field === "devDependencies" &&
+          ALLOWED_OPENMA_DEV_DEPS.get(pkg.dir)?.has(dep.name) === true;
+        if (!allowedCssDep) {
+          problems.push(
+            `${pkg.dir}: must not depend on "${dep.name}" (${dep.field}) — ` +
+              `OpenMA internals are not allowed, use ${OPENMATEL_SCOPE}* packages instead`,
+          );
+        }
       }
 
       // (c) Neither the UI nor the server may embed a store. The UI only

@@ -216,17 +216,6 @@
   color: var(--omt-text);
 }
 
-.omt-count {
-  flex: none;
-  color: var(--omt-text-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  background: var(--omt-surface);
-  border: 1px solid var(--omt-border);
-  border-radius: 999px;
-  padding: 4px 10px;
-}
-
 .omt-source-badge,
 .omt-badge {
   display: inline-flex;
@@ -355,10 +344,9 @@
 }
 
 /* -------------------------------------------------------------------------- */
-/* Session list                                                                */
+/* Shared page primitives (the list itself now lives in @openmatel/oma-console-ui) */
 /* -------------------------------------------------------------------------- */
 
-.omt-session-list,
 .omt-session-detail {
   width: 100%;
   max-width: 1120px;
@@ -374,216 +362,6 @@
   margin-bottom: 16px;
 }
 
-.omt-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.omt-search {
-  position: relative;
-  flex: 1 1 260px;
-  min-width: 220px;
-}
-
-.omt-search-icon {
-  position: absolute;
-  left: 11px;
-  top: 50%;
-  transform: translateY(-52%);
-  color: var(--omt-text-faint);
-  font-size: 16px;
-  pointer-events: none;
-}
-
-.omt-input {
-  width: 100%;
-  height: 36px;
-  padding: 6px 12px 6px 34px;
-  border: 1px solid var(--omt-border-strong);
-  border-radius: 9px;
-  background: var(--omt-surface);
-  color: var(--omt-text);
-  font: inherit;
-  font-size: 13px;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-}
-
-.omt-input::placeholder {
-  color: var(--omt-text-faint);
-}
-
-.omt-input:focus {
-  border-color: var(--omt-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--omt-accent) 18%, transparent);
-  outline: none;
-}
-
-.omt-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.omt-chip {
-  appearance: none;
-  border: 1px solid var(--omt-border);
-  border-radius: 999px;
-  background: var(--omt-surface);
-  color: var(--omt-text-muted);
-  padding: 5px 11px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 550;
-  cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-
-.omt-chip:hover {
-  border-color: var(--omt-accent);
-  color: var(--omt-text);
-}
-
-.omt-chip[aria-pressed="true"] {
-  background: var(--omt-accent);
-  border-color: var(--omt-accent);
-  color: #fff;
-}
-
-.omt-toggle {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid var(--omt-border);
-  border-radius: 999px;
-  background: var(--omt-surface);
-  color: var(--omt-text-muted);
-  padding: 5px 11px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 550;
-  cursor: pointer;
-}
-
-.omt-toggle[aria-pressed="true"] {
-  border-color: var(--omt-danger-border);
-  background: var(--omt-danger-soft);
-  color: var(--omt-danger);
-}
-
-.omt-toggle-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--omt-border-strong);
-}
-
-.omt-toggle-dot-on {
-  background: var(--omt-danger);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--omt-danger) 16%, transparent);
-}
-
-.omt-session-scroll {
-  max-height: max(280px, calc(100vh - 260px));
-  padding: 2px 4px 2px 2px;
-  margin: -2px;
-}
-
-.omt-session-rows {
-  display: flex;
-  flex-direction: column;
-  gap: var(--omt-gap);
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.omt-session-rows > li {
-  margin: 0;
-  padding: 0;
-}
-
-.omt-session-row {
-  appearance: none;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  width: 100%;
-  padding: 12px 14px;
-  border: 1px solid var(--omt-border);
-  border-radius: var(--omt-radius);
-  background: var(--omt-surface);
-  color: var(--omt-text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  box-shadow: var(--omt-shadow);
-  transition: background-color 130ms ease, border-color 130ms ease, transform 130ms ease;
-}
-
-.omt-session-row:hover {
-  background: var(--omt-surface-hover);
-  border-color: var(--omt-border-strong);
-  transform: translateY(-1px);
-}
-
-.omt-session-main {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-.omt-session-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 15px;
-  font-weight: 620;
-  letter-spacing: -0.01em;
-}
-
-.omt-session-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--omt-text-muted);
-  font-size: 12px;
-}
-
-.omt-dot-separator {
-  color: var(--omt-text-faint);
-}
-
-.omt-cwd {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 40ch;
-  font-family: var(--omt-mono);
-  font-size: 11px;
-}
-
-.omt-session-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px 14px;
-}
-
-.omt-metric {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 52px;
-}
-
 .omt-metric-label {
   color: var(--omt-text-faint);
   font-size: 10px;
@@ -592,17 +370,10 @@
   text-transform: uppercase;
 }
 
-.omt-metric-value,
 .omt-metric-card-value {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.omt-load-more {
-  display: flex;
-  justify-content: center;
-  padding: 12px 0 4px;
 }
 
 .omt-loading,
@@ -1022,21 +793,8 @@
 /* -------------------------------------------------------------------------- */
 
 @media (max-width: 720px) {
-  .omt-session-list,
   .omt-session-detail {
     padding: 14px;
-  }
-
-  .omt-session-row {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .omt-session-metrics {
-    justify-content: flex-start;
-  }
-
-  .omt-session-scroll {
-    max-height: none;
   }
 
   .omt-timeline-scroll {

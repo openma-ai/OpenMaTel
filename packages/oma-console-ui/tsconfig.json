@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["vendor/*"]
+    },
+    "rootDirs": ["vendor", "shims"]
+  },
+  "include": ["vendor/**/*.ts", "vendor/**/*.tsx", "shims/**/*.ts", "shims/**/*.tsx"]
+}

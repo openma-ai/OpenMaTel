@@ -25,11 +25,6 @@ export {
   type ObsProviderProps,
   type ObsTheme,
 } from "./provider.js";
-export {
-  SESSION_SOURCES,
-  SessionList,
-  type SessionListProps,
-} from "./SessionList.js";
 export { SessionDetail, type SessionDetailProps } from "./SessionDetail.js";
 export {
   StepTimeline,
