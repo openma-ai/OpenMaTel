@@ -14,15 +14,29 @@
  * produced it. A message of the role `toolResult` is the result of a tool
  * call and names the call it belongs to with `toolCallId`.
  *
- * Turns: every message of the user starts a turn; the turn ends when the next
- * message of the user arrives or when the session ends.
+ * Newer pi versions also write `compaction` and `branch_summary` entries, and
+ * a session header can point at the session it was forked from. Those are
+ * context boundaries, not ordinary messages: they open a new `segment` and
+ * become a `segment.boundary` event (design §15.1).
+ *
+ * Turns: every real user message starts a turn; the turn ends when the agent
+ * yields (the assistant stops with a reason other than `toolUse`), or when the
+ * next user message / the end of the session arrives.
  */
 
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import type { AgentEvent, Normalizer, RawRecord } from "@openmatel/core";
+import {
+  FIRST_SEGMENT_ID,
+  contextTokens,
+  type AgentEvent,
+  type EventContent,
+  type Normalizer,
+  type RawRecord,
+  type SegmentBoundaryReason,
+} from "@openmatel/core";
 
 import {
   EventScope,
@@ -59,8 +73,33 @@ export const FORMAT = "pi.jsonl";
 /** The session id the agent puts into the file name. */
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
-/** Record types this normalizer knows about. */
-const KNOWN_TYPES = new Set(["session", "model_change", "thinking_level_change", "message"]);
+/**
+ * Record types this normalizer knows about.
+ *
+ * The extra entries are written by newer pi versions. They are recognized so
+ * they never surface as `raw.unknown`; only the ones that describe a context
+ * boundary change the trace.
+ */
+const KNOWN_TYPES = new Set([
+  "session",
+  "model_change",
+  "thinking_level_change",
+  "message",
+  "compaction",
+  "branch_summary",
+  "branch",
+  "fork",
+  "resume",
+  "session_info",
+  "label",
+  "custom",
+  "custom_message",
+  "context_edit",
+  "usage",
+]);
+
+/** Stop reasons after which the agent continues with another model call. */
+const CONTINUES_TURN = new Set(["toolUse", "pending"]);
 
 /** Directory below `$HOME` that holds the pi sessions. */
 function sessionsRoot(home: string): string {
@@ -119,6 +158,20 @@ interface PiState {
   turnId?: string;
   turnOpen: boolean;
   toolCalls: ToolCallRegistry;
+  /** First segment is `seg_0`; a boundary opens `seg_1`, `seg_2`, … */
+  segmentIndex: number;
+  segmentId: string;
+  /** Last context size a model call reported, if any. */
+  lastContextTokens: number | null;
+  /** Context window of the model, when the source reported one. */
+  contextWindow?: number;
+  /** Boundaries whose `context_tokens_after` waits for the next call. */
+  pendingBoundaries: PendingBoundary[];
+}
+
+interface PendingBoundary {
+  event: AgentEvent;
+  before: number | null;
 }
 
 /** Create the state for one session file. */
@@ -130,6 +183,10 @@ function createState(file: SessionFile): PiState {
     turnIndex: 0,
     turnOpen: false,
     toolCalls: new ToolCallRegistry(),
+    segmentIndex: 0,
+    segmentId: FIRST_SEGMENT_ID,
+    lastContextTokens: null,
+    pendingBoundaries: [],
   };
 }
 
@@ -157,6 +214,7 @@ function ensureSessionStart(state: PiState, ts: string, ref: string): AgentEvent
     line: state.scope.line,
     sub: state.scope.next(),
     kind: "session.start",
+    segmentId: state.segmentId,
     ts,
     attrs: sessionStartAttrs({
       harness: SOURCE,
@@ -185,6 +243,7 @@ function startTurn(state: PiState, ts: string, ref: string): void {
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "turn.start",
+      segmentId: state.segmentId,
       ts,
       turnId: state.turnId,
       attrs: { trigger: "user" },
@@ -203,6 +262,7 @@ function endTurn(state: PiState, ts: string, ref: string, stopReason: string): v
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "turn.end",
+      segmentId: state.segmentId,
       ts,
       turnId: state.turnId,
       attrs,
@@ -211,6 +271,84 @@ function endTurn(state: PiState, ts: string, ref: string, stopReason: string): v
   );
   state.turnOpen = false;
   state.turnId = undefined;
+}
+
+/** Content of a compaction / branch summary, captured like other content. */
+function summaryContent(summary: string | undefined): EventContent | undefined {
+  if (summary === undefined) return undefined;
+  return { output: { text: summary }, capture: "full" };
+}
+
+/**
+ * Open a new segment with a `segment.boundary` event (design §15.1).
+ *
+ * `context_tokens_before` is the last context size a call reported; when the
+ * boundary itself reports a token count (pi's `compaction.tokensBefore`) and
+ * no call came before it, that value is used instead. `context_tokens_after`
+ * and `tokens_removed` can only be filled once the first call after the
+ * boundary is known, so the event is queued in `pendingBoundaries`.
+ */
+function emitSegmentBoundary(
+  state: PiState,
+  init: {
+    ts: string;
+    ref: string;
+    reason: SegmentBoundaryReason;
+    tokensBefore?: number | null;
+    summary?: string | undefined;
+  },
+): AgentEvent {
+  const parentSegmentId = state.segmentId;
+  state.segmentIndex += 1;
+  state.segmentId = `seg_${state.segmentIndex}`;
+
+  const before = state.lastContextTokens ?? init.tokensBefore ?? null;
+  const content = summaryContent(init.summary);
+  const attrs: Record<string, unknown> = {
+    reason: init.reason,
+    context_tokens_before: before,
+    context_tokens_after: null,
+    tokens_removed: null,
+    parent_segment_id: parentSegmentId,
+    derived: false,
+  };
+  if (init.summary !== undefined) attrs.summary = init.summary;
+
+  const event = state.factory.create({
+    line: state.scope.line,
+    sub: state.scope.next(),
+    kind: "segment.boundary",
+    segmentId: state.segmentId,
+    ts: init.ts,
+    attrs,
+    content,
+    ref: init.ref,
+  });
+
+  state.pendingBoundaries.push({ event, before });
+  state.events.push(event);
+  return event;
+}
+
+/** Fill the derived `after` / `removed` values of the pending boundaries. */
+function completeBoundaries(state: PiState, context: number | null): void {
+  if (state.pendingBoundaries.length === 0) return;
+
+  for (const pending of state.pendingBoundaries) {
+    pending.event.attrs.context_tokens_after = context;
+    if (context !== null) {
+      pending.event.attrs.derived = true;
+      if (pending.before !== null) {
+        pending.event.attrs.tokens_removed = pending.before - context;
+      }
+    }
+  }
+  state.pendingBoundaries = [];
+}
+
+/** Read an explicit context window from a record, when the format has one. */
+function contextWindowOf(value: Record<string, unknown>): number | undefined {
+  return asNumber(value.contextWindow) ?? asNumber(value.context_window);
 }
 
 /** Handle the `session` record. */
@@ -224,8 +362,18 @@ function handleSession(state: PiState, data: Record<string, unknown>, ts: string
   if (cwd !== undefined) state.cwd = cwd;
   const nativeSessionId = asString(data.id);
   if (nativeSessionId !== undefined) state.nativeSessionId = nativeSessionId;
+  const contextWindow = contextWindowOf(data);
+  if (contextWindow !== undefined) state.contextWindow = contextWindow;
 
   ensureSessionStart(state, ts, ref);
+
+  // A session with a parent was created with /fork, /clone or
+  // newSession({ parentSession }); it starts from a context checkpoint.
+  const parentSession =
+    asString(data.parentSession) ?? asString(data.parent_session) ?? asString(data.forkedFrom);
+  if (parentSession !== undefined && state.segmentIndex === 0) {
+    emitSegmentBoundary(state, { ts, ref, reason: "fork" });
+  }
 }
 
 /** Handle the `model_change` record. */
@@ -242,7 +390,41 @@ function handleModelChange(
     state.model = model;
     if (state.sessionStart) state.sessionStart.attrs.model = model;
   }
+  const contextWindow = contextWindowOf(data);
+  if (contextWindow !== undefined) state.contextWindow = contextWindow;
   ensureSessionStart(state, ts, ref);
+}
+
+/** Handle a compaction entry: context was summarized into a new segment. */
+function handleCompaction(
+  state: PiState,
+  data: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  const tokensBefore = asNumber(data.tokensBefore) ?? asNumber(data.tokens_before) ?? null;
+  emitSegmentBoundary(state, {
+    ts,
+    ref,
+    reason: "compaction",
+    tokensBefore,
+    summary: asString(data.summary),
+  });
+}
+
+/** Handle a branch summary: pi switched to a forked branch of the tree. */
+function handleBranchSummary(
+  state: PiState,
+  data: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  emitSegmentBoundary(state, {
+    ts,
+    ref,
+    reason: "fork",
+    summary: asString(data.summary),
+  });
 }
 
 /** Handle the `message` record. */
@@ -294,6 +476,7 @@ function handleUserMessage(
       line: state.scope.line,
       sub: state.scope.next(),
       kind: "message.user",
+      segmentId: state.segmentId,
       ts,
       turnId: state.turnId,
       attrs: { role: "user" },
@@ -333,6 +516,7 @@ function handleAssistantMessage(
         line: state.scope.line,
         sub: state.scope.next(),
         kind: "reasoning",
+        segmentId: state.segmentId,
         ts,
         turnId: state.turnId,
         attrs: { role: "assistant" },
@@ -353,6 +537,7 @@ function handleAssistantMessage(
         line: state.scope.line,
         sub: state.scope.next(),
         kind: "message.agent",
+        segmentId: state.segmentId,
         ts,
         turnId: state.turnId,
         attrs: { role: "assistant" },
@@ -362,41 +547,66 @@ function handleAssistantMessage(
     );
   }
 
-  // The call of the model itself.
-  const usage = isPlainObject(message.usage) ? message.usage : undefined;
-  const cost = usage && isPlainObject(usage.cost) ? usage.cost : undefined;
-  const stopReason = asString(message.stopReason);
+  // The call of the model itself. pi writes one assistant message per model
+  // call, so this is exactly one `llm.call` step (design §15.4–§15.5).
+  const usageRecord = isPlainObject(message.usage) ? message.usage : undefined;
+  const cost = usageRecord && isPlainObject(usageRecord.cost) ? usageRecord.cost : undefined;
+  const stopReason =
+    asString(message.stopReason) ?? asString(message.rawStopReason);
+  const usage = usageRecord
+    ? usageFrom(
+        {
+          input_tokens: asNumber(usageRecord.input) ?? null,
+          output_tokens: asNumber(usageRecord.output) ?? null,
+          cache_read_tokens: asNumber(usageRecord.cacheRead) ?? null,
+          cache_write_tokens: asNumber(usageRecord.cacheWrite) ?? null,
+          reasoning_tokens: asNumber(usageRecord.reasoning) ?? null,
+          cost_usd: asNumber(cost?.total) ?? null,
+          cost_source: "harness",
+        },
+        "harness",
+      )
+    : emptyUsage("missing");
+
+  const context = contextTokens(usage);
+  const contextWindow = contextWindowOf(message) ?? state.contextWindow ?? null;
+  const requestId =
+    asString(message.responseId) ?? asString(message.requestId) ?? asString(message.request_id);
   const llmAttrs = llmCallAttrs({
     provider: state.provider,
     model: state.model,
+    contextTokens: context,
     stopReason,
+    requestId,
+    contextWindow,
   });
+  // The contract keeps these optional keys optional, but every pi call can
+  // carry them explicitly: unknown is null, never a made-up value. pi does not
+  // report latency or TTFT, so both stay null and `derived` stays empty.
+  if (llmAttrs.request_id === undefined) llmAttrs.request_id = null;
+  if (llmAttrs.context_window === undefined) llmAttrs.context_window = null;
+  llmAttrs.derived = [];
 
+  const llmSub = state.scope.next();
   state.events.push(
     state.factory.create({
       line: state.scope.line,
-      sub: state.scope.next(),
+      sub: llmSub,
       kind: "llm.call",
+      segmentId: state.segmentId,
       ts,
       turnId: state.turnId,
+      stepId: state.factory.stepIdFor(state.scope.line, llmSub),
       attrs: llmAttrs,
-      usage: usage
-        ? usageFrom(
-            {
-              input_tokens: asNumber(usage.input) ?? null,
-              output_tokens: asNumber(usage.output) ?? null,
-              cache_read_tokens: asNumber(usage.cacheRead) ?? null,
-              cache_write_tokens: asNumber(usage.cacheWrite) ?? null,
-              reasoning_tokens: asNumber(usage.reasoning) ?? null,
-              cost_usd: asNumber(cost?.total) ?? null,
-              cost_source: "harness",
-            },
-            "harness",
-          )
-        : emptyUsage("missing"),
+      usage,
       ref,
     }),
   );
+
+  // The first call after a compaction/fork completes the boundary's derived
+  // `context_tokens_after` and `tokens_removed`.
+  completeBoundaries(state, context);
+  if (context !== null) state.lastContextTokens = context;
 
   // The tools the agent used. pi writes the call and its result as two
   // messages; the result names the call it belongs to.
@@ -420,8 +630,19 @@ function handleAssistantMessage(
       cwd: state.cwd,
       scope: state.scope,
     });
+    for (const event of events) event.segment_id = state.segmentId;
     state.toolCalls.register(call);
     state.events.push(...events);
+  }
+
+  // A call that does not ask for a tool yields control back to the user; the
+  // turn is over even before the next user message arrives (design §15.2).
+  if (
+    state.turnOpen &&
+    stopReason !== undefined &&
+    !CONTINUES_TURN.has(stopReason)
+  ) {
+    endTurn(state, ts, ref, stopReason);
   }
 }
 
@@ -480,6 +701,38 @@ function handleRecord(state: PiState, record: RawRecord): void {
       // The reasoning effort of the agent; it does not change the trace.
       break;
     }
+    case "compaction": {
+      handleCompaction(state, data, ts, ref);
+      break;
+    }
+    case "branch_summary":
+    case "branch":
+    case "fork": {
+      handleBranchSummary(state, data, ts, ref);
+      break;
+    }
+    case "resume": {
+      emitSegmentBoundary(state, { ts, ref, reason: "resume" });
+      break;
+    }
+    case "session_info": {
+      const name = asString(data.name);
+      if (name !== undefined && name !== "") {
+        state.explicitTitle = name;
+        refreshTitle(state);
+      }
+      break;
+    }
+    case "label":
+    case "custom":
+    case "custom_message":
+    case "context_edit":
+    case "usage": {
+      // Recognized bookkeeping / extension records: no trace step of their
+      // own. (A `usage` entry is out-of-band accounting, not a model call of
+      // the conversation.)
+      break;
+    }
     default: {
       if (type !== "" && !KNOWN_TYPES.has(type)) {
         state.events.push(
@@ -487,6 +740,7 @@ function handleRecord(state: PiState, record: RawRecord): void {
             line,
             sub: state.scope.next(),
             kind: "raw.unknown",
+            segmentId: state.segmentId,
             ts,
             attrs: { record_type: type },
             ref,
@@ -521,6 +775,7 @@ function finalize(state: PiState, file: SessionFile, endLine: number): void {
       line: endLine,
       sub: state.scope.next(),
       kind: "session.end",
+      segmentId: state.segmentId,
       ts: endTs,
       attrs,
       ref: file.path,
