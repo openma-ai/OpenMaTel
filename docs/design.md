@@ -591,3 +591,73 @@ Scale 档（`docker-compose.scale.yml`）在此基础上加 `clickhouse/clickhou
 4. 桌面默认存储：SQLite（推荐），DuckDB 作为可选分析层。
 5. 默认 capture level：desktop 用 `full`，hosted 新建项目用 `truncated`（建议）。
 6. dsh：是否允许把 `DSH_TELEMETRY_OTLP_URL` 指向 OpenMaTel，并要求 dsh 公开 session v4 格式文档；Martty 和 backchat 的会话目录需要维护者确认。
+
+---
+
+## 15. 分层会话模型（Layered session model，2026-10-20 新增）
+
+Agent 会话不是平铺的 span 列表。OpenMaTel 用四层结构表示一个 session。其中 **Segment 和 Turn 是 schema 的一等字段**（每个事件都带 `segment_id` / `turn_id`，Query API 可以按它们过滤和聚合）。
+
+```
+Session
+ └─ Segment (按 context 边界切分：compaction / resume / fork)
+     ├─ [segment boundary node：compaction summary, tokens_before, tokens_after, tokens_removed]
+     └─ Turn (从一条用户消息开始，到 agent 交回控制权为止 —— 默认视图；eval score / RL reward 的单位)
+         └─ Step：llm_call | tool_call | sandbox op（env.command / env.file_edit / env.browser）| sub-agent（嵌套 session，可钻取）
+ (idle-gap marker：只是时间轴上的折叠标记，不是结构)
+```
+
+### 15.1 Segment（最外层）
+- 新 segment 从以下边界开始：**context compaction**（自动或手动）、**resume**（从磁盘恢复，context 被重新装载）、**fork**（从某个点分叉出新分支）。session 的第一个 segment 是 `seg_0`。
+- 边界本身是一个节点（`kind: "segment.boundary"`），attrs 包括：`reason: compaction|resume|fork|unknown`、`context_tokens_before`、`context_tokens_after`、`tokens_removed`、`summary`（compaction summary 的内容，受 capture level 约束）、`parent_segment_id`。
+- 来源没有给出某个数值时就写 `null`。可以从相邻 llm_call 推算时，标记 `derived: true`。
+
+### 15.2 Turn（默认视图）
+- 从一条真实的用户输入开始（不包括 tool_result、系统注入或 meta 消息），到 agent 交回控制权为止：最终回复、等待用户（permission / question）、被中断，或报错停止。
+- Turn 是 **eval score 和 RL reward 挂载的单位**（`Score.target = {session_id, turn_id}`）。
+- Turn 汇总：step 数、tool 错误数、usage（覆盖率）、时长（墙钟时长和"活跃"时长，活跃时长扣除 idle gap）、`stop_reason`、signals。
+
+### 15.3 Idle-gap marker（非结构）
+- 两个相邻事件间隔超过阈值（默认 **30 min**，可以按项目或在 UI 中配置）时，时间轴把这段时间折叠成一个 marker。它不创建 segment 或 turn，也不进 schema，是查询时或渲染时计算出来的。
+
+### 15.4 Steps
+- `llm.call`：一次模型调用，一个 step（见 15.5）。
+- `tool.call`：input、output、error、duration，有 retry 链接时带上。
+- sandbox op：`env.command`（command、exit_code、stdout/stderr）、`env.file_edit`（path、diff）、`env.browser`。作为 tool.call 的子 step。
+- sub-agent：`subagent.spawn` 指向一个 child session（`child_session_id`），UI 可以钻取进去。
+
+### 15.5 Per-source LLM call adapters
+每个来源的 normalizer 必须把一次模型调用归一化成**恰好一个** `llm.call` step：
+
+| 字段 | 含义 |
+|---|---|
+| `provider`, `model` | 未知时为 null；Claude Code 的 `<synthetic>` 不算模型 |
+| `usage.input_tokens` | **未命中缓存的**输入 token |
+| `usage.cache_read_tokens` / `usage.cache_write_tokens` | 缓存读 / 写 |
+| `usage.output_tokens`, `usage.reasoning_tokens` | 输出 / 推理（来源没有区分时，reasoning 为 null） |
+| `attrs.context_tokens` | = input + cache_read + cache_write（这次调用看到的完整 prompt 大小）；任一项未知时为 null |
+| `attrs.stop_reason`, `attrs.latency_ms`, `attrs.ttft_ms` | 未知时为 null |
+| `turn_id`, `segment_id` | 必填 |
+
+规则：**未知 = null，永不为 0**。各来源"input"口径不一样（Codex 的 `input_tokens` 包含 cached；Claude / dsh / pi 不包含），adapter 必须换算成上表的口径。
+
+### 15.6 自动标记的信号（signals）
+在 turn 和 session 级别计算（存在 `attrs.signals[]`，可以查询）：
+- `repeated_tool_failure`：同一个工具（名称和输入大致相同）连续失败 ≥ 3 次。
+- `loop`：同样的 tool 和输入在一个 turn 里重复 ≥ 3 次，或 N 步内反复出现相同的 step 序列。
+- `user_interrupt`：用户中断（ESC、cancel、`control.interrupt`）。
+- `user_correction`：中断后紧接着用户发消息纠正，或用户消息以否定或纠正开头（启发式，标记 `confidence`）。
+
+### 15.7 Agent 专属视图
+- **Context delta**：每个 llm_call 的 `context_tokens` 减去同一 segment 中上一个 llm_call 的值（新增上下文 = 工具输出、用户输入等）。
+- **Context watermark 曲线**：按调用序列绘制 `context_tokens`。compaction 处出现下降，segment 边界会标出来；如果来源提供了 context window，就画成上限线。
+- **Cache hit ratio**：`cache_read / context_tokens`，按调用、turn、session 计算。
+- Token 显示：**"tokens in" = context_tokens**（包含缓存），不再只显示未缓存的 input。这修复了 Claude Code 只显示几百个 token 的问题。
+
+### 15.8 本机实测：各来源暴露了什么（2026-10-20，box 上的真实文件）
+| 来源 | compaction / resume / fork | 每次调用的 usage | stop reason | latency / TTFT |
+|---|---|---|---|---|
+| Claude Code | 格式支持（`isCompactSummary`、`system`/`compact_boundary`），**本机样本中没有出现**；resume 可以从 `parentUuid` 链断裂、新 `sessionId` 推断 | ✅ input / cache_creation / cache_read / output（+ `thinking_tokens`） | ✅ `stop_reason` | 可以从 `api-request` 和 assistant 的时间戳推算 latency（derived）；没有 TTFT |
+| Codex | 格式支持 `compacted`，**本机样本中没有出现** | ✅ `token_count.last_token_usage`（input 含 cached、cached_input、cache_write、output、reasoning） | ❌ | ❌ |
+| dsh | **本机样本中没有 compaction 记录**；`request/context` 提供 contextWindow | ✅ `assistant/message.usage`（input / output / cacheRead / cacheWrite） | 部分（turn/end reason） | ✅ 可以从 stream chunk 时间推算 TTFT 和 latency |
+| pi | ❌ 未见 | ✅ input / output / cacheRead / cacheWrite / reasoning（+ cost） | ✅ `stopReason` | ❌ |
