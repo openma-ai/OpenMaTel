@@ -1753,6 +1753,8 @@
           "turn_id",
           "segment_id",
           "ts",
+          "request_index",
+          "purpose",
           "model",
           "context_tokens",
           "context_delta",
@@ -1766,6 +1768,10 @@
           "stop_reason",
           "latency_ms",
           "ttft_ms",
+          "decode_ms",
+          "output_tokens_per_s",
+          "retry",
+          "derived",
           "usage"
         ],
         "properties": {
@@ -1787,6 +1793,23 @@
           "ts": {
             "type": "string",
             "format": "date-time"
+          },
+          "request_index": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based position of the call in its session, in timestamp order."
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "chat",
+              "compaction",
+              null
+            ],
+            "description": "Whether the call served the conversation or a context compaction."
           },
           "model": {
             "type": [
@@ -1866,6 +1889,37 @@
               "null"
             ]
           },
+          "decode_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "latency_ms - ttft_ms."
+          },
+          "output_tokens_per_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Output tokens divided by the decode time in seconds."
+          },
+          "retry": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LlmCallRetry"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "derived": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Fields derived rather than reported by the source."
+          },
           "usage": {
             "oneOf": [
               {
@@ -1934,6 +1988,42 @@
             }
           },
           "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LlmCallRetry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attempt",
+          "max_attempts",
+          "delay_ms",
+          "error_code"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "delay_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "error_code": {
             "type": [
               "string",
               "null"

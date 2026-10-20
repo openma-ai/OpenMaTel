@@ -105,7 +105,7 @@ rewrites it, and `"append"` when it checks that appended lines are picked up.
 | Step filters | `listSteps` filters by `kind` (one or many), `status`, `segment_id` and `turn_id`; each step reports its `segment_id`. |
 | Segments | `getSegments` groups turns under their segment, exposes the opening boundary and aggregates the segment metrics. |
 | Turns | `getTurns` returns turn summaries with signals and prompt previews; `segment_id` filters them. |
-| LLM calls | `getLlmCalls` returns the `llmCallSeries` rows with context deltas, watermarks, cache ratios, latency/TTFT, stop reason and usage; both filters keep the deltas relative to the full segment. |
+| LLM calls | `getLlmCalls` returns the `llmCallSeries` rows with request index, purpose, context deltas, watermarks, cache ratios, latency/TTFT/decode throughput, retry facts, stop reason and usage; both filters keep the deltas relative to the full segment. |
 | Content | A step captured with `capture: "none"` comes back without any input or output text. |
 | Unknown id | `getSession` returns `null` for an id that does not exist. |
 | Aggregation | When the store implements the optional `aggregate` port, every stored event is counted. |

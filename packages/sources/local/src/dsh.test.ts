@@ -68,10 +68,28 @@ const compactionFile: SessionFile = {
 const compactionRecords = await readDshRecords(compactionFile);
 const compactionEvents = normalizeDshFile(compactionFile, compactionRecords);
 
+const checkpointFile: SessionFile = {
+  source: "dsh",
+  path: path.join(
+    temp.home,
+    ".dsh",
+    "sessions",
+    "--home-user-checkpoint--",
+    "session-99999999-9999-4999-8999-999999999999",
+    "synthetic-checkpoint.jsonl.zstd",
+  ),
+  size: 0,
+  mtimeMs: 0,
+  sourceSessionId: "99999999-9999-4999-8999-999999999999",
+};
+const checkpointRecords = await readDshRecords(checkpointFile);
+const checkpointEvents = normalizeDshFile(checkpointFile, checkpointRecords);
+
 const allRecords = [
   ...(await Promise.all(files.map((candidate) => readDshRecords(candidate)))).flat(),
   ...streamRecords,
   ...compactionRecords,
+  ...checkpointRecords,
 ];
 
 normalizerContract("dsh normalizer", dshNormalizer, allRecords);
@@ -108,6 +126,7 @@ describe("@openmatel/source-local — dsh", () => {
     expect(file.path).toMatch(/session\.v4\.jsonl\.zstd$/);
     expect(streamFile.sourceSessionId).toBe("55555555-5555-4555-8555-555555555555");
     expect(compactionFile.sourceSessionId).toBe("66666666-6666-4666-8666-666666666666");
+    expect(checkpointFile.sourceSessionId).toBe("99999999-9999-4999-8999-999999999999");
   });
 
   it("decodes the file, which is a series of zstd frames", () => {
@@ -163,6 +182,7 @@ describe("@openmatel/source-local — dsh", () => {
     expect(countOfKind(events, "raw.unknown")).toBe(0);
     expect(countOfKind(streamEvents, "raw.unknown")).toBe(0);
     expect(countOfKind(compactionEvents, "raw.unknown")).toBe(0);
+    expect(countOfKind(checkpointEvents, "raw.unknown")).toBe(0);
   });
 
   it("emits at least one tool call, with its result", () => {
@@ -215,14 +235,14 @@ describe("@openmatel/source-local — dsh", () => {
   });
 
   it("produces valid canonical events", () => {
-    for (const event of [...events, ...streamEvents, ...compactionEvents]) {
+    for (const event of [...events, ...streamEvents, ...compactionEvents, ...checkpointEvents]) {
       const result = validateEvent(event);
       expect(result.ok, result.ok ? "" : result.errors.join("; ")).toBe(true);
     }
   });
 
   it("puts a segment id on every event", () => {
-    for (const event of [...events, ...streamEvents, ...compactionEvents]) {
+    for (const event of [...events, ...streamEvents, ...compactionEvents, ...checkpointEvents]) {
       expect(event.segment_id).toMatch(/^seg_\d+$/);
     }
   });
@@ -232,6 +252,19 @@ describe("@openmatel/source-local — dsh", () => {
     expect(countOfKind(streamEvents, "control.retry")).toBe(1);
     expect(countOfKind(streamEvents, "turn.start")).toBe(1);
     expect(countOfKind(streamEvents, "turn.end")).toBe(1);
+
+    const calls = llmCalls(streamEvents);
+    expect(calls.map((call) => call.attrs.request_index)).toEqual([1, 2]);
+    expect(calls.map((call) => call.attrs.purpose)).toEqual(["chat", "chat"]);
+    // The retry does not add a call: the settled call carries the attempt
+    // facts of the failed attempt that preceded it.
+    expect(calls[0]?.attrs.retry).toBeNull();
+    expect(calls[1]?.attrs.retry).toEqual({
+      attempt: 1,
+      max_attempts: 2,
+      delay_ms: 10,
+      error_code: "TRANSPORT",
+    });
   });
 
   it("derives latency and TTFT from the stream and marks them as derived", () => {
@@ -307,6 +340,8 @@ describe("@openmatel/source-local — dsh", () => {
 
     const boundary = boundaries[0];
     expect(boundary.segment_id).toBe("seg_1");
+    expect(boundary.ts).toBe("2023-11-14T22:15:01.700Z");
+    expect(boundary.end_ts).toBe("2023-11-14T22:15:01.901Z");
     expect(boundary.attrs).toMatchObject({
       reason: "compaction",
       context_tokens_before: 1000,
@@ -321,8 +356,27 @@ describe("@openmatel/source-local — dsh", () => {
     );
 
     const calls = llmCalls(compactionEvents);
-    expect(calls.map((call) => call.segment_id)).toEqual(["seg_0", "seg_1"]);
-    expect(calls.map((call) => call.attrs.context_tokens)).toEqual([1000, 150]);
+    expect(calls.map((call) => call.segment_id)).toEqual(["seg_0", "seg_1", "seg_1"]);
+    expect(calls.map((call) => call.attrs.request_index)).toEqual([1, 2, 3]);
+    expect(calls.map((call) => call.attrs.purpose)).toEqual([
+      "chat",
+      "compaction",
+      "chat",
+    ]);
+    expect(calls.map((call) => call.attrs.context_tokens)).toEqual([1000, 1000, 150]);
+    expect(calls[1]?.attrs).toMatchObject({
+      provider: "synthetic-provider",
+      model: "synthetic-summary-model",
+      purpose: "compaction",
+      request_index: 2,
+    });
+    expect(calls[1]?.usage).toMatchObject({
+      input_tokens: 900,
+      output_tokens: 20,
+      cache_read_tokens: 100,
+      cache_write_tokens: 0,
+      source: "harness",
+    });
   });
 
   it("maps request/header resume to a segment boundary", () => {
@@ -412,6 +466,106 @@ describe("@openmatel/source-local — dsh", () => {
       derived: true,
     });
     expect(llmCalls(normalized).map((call) => call.segment_id)).toEqual(["seg_0", "seg_1"]);
+  });
+
+  it("maps compaction checkpoints to boundaries and keeps summary authoritative", () => {
+    const boundaries = eventsOfKind(checkpointEvents, "segment.boundary");
+    expect(boundaries).toHaveLength(2);
+    expect(boundaries.map((boundary) => boundary.attrs.reason)).toEqual([
+      "compaction",
+      "compaction",
+    ]);
+    expect(boundaries[0]?.attrs.summary).toBe("Synthetic authoritative summary.");
+    expect(boundaries[0]?.content?.output?.text).toBe("Synthetic authoritative summary.");
+    expect(boundaries[0]?.ts).toBe("2023-11-14T22:20:01.700Z");
+    expect(boundaries[0]?.end_ts).toBe("2023-11-14T22:20:01.900Z");
+    // A checkpoint without a summary record carries the replacement body.
+    expect(boundaries[1]?.attrs.summary).toBe("Synthetic checkpoint-only summary.");
+    expect(boundaries[1]?.ts).toBe("2023-11-14T22:20:03.000Z");
+    expect(boundaries[1]?.end_ts).toBe("2023-11-14T22:20:03.100Z");
+
+    // The checkpoint is not a user turn and does not add a message.user.
+    expect(countOfKind(checkpointEvents, "turn.start")).toBe(2);
+    expect(
+      eventsOfKind(checkpointEvents, "message.user").map(
+        (event) => event.content?.input?.text,
+      ),
+    ).toEqual([
+      "Synthetic checkpoint fixture prompt.",
+      "Synthetic prompt after checkpoint compactions.",
+    ]);
+
+    const calls = llmCalls(checkpointEvents);
+    expect(calls.map((call) => call.attrs.request_index)).toEqual([1, 2, 3, 4]);
+    expect(calls.map((call) => call.attrs.purpose)).toEqual([
+      "chat",
+      "compaction",
+      "chat",
+      "chat",
+    ]);
+    expect(calls[1]?.attrs).toMatchObject({
+      provider: "synthetic-summary-provider",
+      model: "synthetic-summary-model",
+    });
+    expect(calls[1]?.usage?.output_tokens).toBe(10);
+  });
+
+  it("keeps the compaction start/end time and error on the boundary", () => {
+    const state = syntheticFile("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const records: RawRecord[] = [
+      rawRecord(state, 1, {
+        type: "session",
+        version: 4,
+        id: `session-${state.sourceSessionId}`,
+        createdAt: 1700000500000,
+        cwd: "/home/user/error-compaction",
+        delegationDepth: 0,
+      }),
+      rawRecord(state, 2, {
+        type: "compaction/start",
+        seq: 0,
+        time: 1700000501000,
+        data: { compactionId: "synthetic-failed", turn: null },
+      }),
+      rawRecord(state, 3, {
+        type: "compaction/summary",
+        seq: 1,
+        time: 1700000501500,
+        data: {
+          compactionId: "synthetic-failed",
+          turn: null,
+          summary: [{ type: "text", text: "Synthetic failed summary." }],
+          provider: "synthetic-provider",
+          model: "synthetic-summary-model",
+          usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      }),
+      rawRecord(state, 4, {
+        type: "compaction/end",
+        seq: 2,
+        time: 1700000502000,
+        data: {
+          compactionId: "synthetic-failed",
+          turn: null,
+          error: "Synthetic compaction failure",
+        },
+      }),
+    ];
+
+    const normalized = normalizeDshFile(state, records);
+    const boundary = firstEventOfKind(normalized, "segment.boundary");
+    expect(boundary?.ts).toBe("2023-11-14T22:21:41.000Z");
+    expect(boundary?.end_ts).toBe("2023-11-14T22:21:42.000Z");
+    expect(boundary?.status).toBe("error");
+    expect(boundary?.error).toEqual({
+      type: "compaction_error",
+      message: "Synthetic compaction failure",
+    });
+    expect(boundary?.attrs.summary).toBe("Synthetic failed summary.");
+
+    const call = firstEventOfKind(normalized, "llm.call");
+    expect(call?.attrs.purpose).toBe("compaction");
+    expect(call?.attrs.request_index).toBe(1);
   });
 
   it("maps an inherited session/end-seed marker to a fork boundary", () => {

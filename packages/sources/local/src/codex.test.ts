@@ -193,6 +193,8 @@ describe("@openmatel/source-local — Codex", () => {
     expect(calls).toHaveLength(11);
 
     const first = calls[0];
+    expect(first.attrs.request_index).toBe(1);
+    expect(first.attrs.purpose).toBe("chat");
     expect(first.attrs.provider).toBe("redacted text");
     expect(first.attrs.model).toBe("gpt-6.1-sol");
     expect(first.attrs.context_tokens).toBe(15274);
@@ -203,6 +205,9 @@ describe("@openmatel/source-local — Codex", () => {
     expect(first.attrs.stop_reason).toBeNull();
     expect(first.attrs.latency_ms).toBeNull();
     expect(first.attrs.ttft_ms).toBeNull();
+    expect(first.attrs.decode_ms).toBeNull();
+    expect(first.attrs.output_tokens_per_s).toBeNull();
+    expect(first.attrs.retry).toBeNull();
     // Codex has no timestamps for a call boundary, so nothing is estimated.
     expect(first.attrs.derived).toEqual([]);
 
@@ -224,8 +229,15 @@ describe("@openmatel/source-local — Codex", () => {
       expect(call.attrs).toHaveProperty("request_id");
       expect(call.attrs).toHaveProperty("context_window");
       expect(call.attrs).toHaveProperty("derived");
+      expect(call.attrs).toHaveProperty("decode_ms");
+      expect(call.attrs).toHaveProperty("output_tokens_per_s");
+      expect(call.attrs).toHaveProperty("retry");
+      expect(call.attrs.purpose).toBe("chat");
       expect(Array.isArray(call.attrs.derived)).toBe(true);
     }
+    expect(calls.map((call) => call.attrs.request_index)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+    ]);
   });
 
   it("opens a new segment at a compacted record and fills before/after", () => {

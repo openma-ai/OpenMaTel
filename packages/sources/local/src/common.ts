@@ -36,6 +36,8 @@ import {
   type EventContent,
   type EventError,
   type EventKind,
+  type LlmCallPurpose,
+  type LlmCallRetry,
   type RawRecord,
   type StepStatus,
   type ToolKind,
@@ -609,12 +611,17 @@ export function usageFrom(parts: UsageParts, source: UsageSource = "provider"): 
 
 /** Input of {@link llmCallAttrs}; every value is optional and becomes `null`. */
 export interface LlmCallAttrsInit {
+  requestIndex?: number | undefined;
+  purpose?: LlmCallPurpose | null | undefined;
   provider?: string | undefined;
   model?: string | undefined;
   contextTokens?: number | null | undefined;
   stopReason?: string | undefined;
   latencyMs?: number | null | undefined;
   ttftMs?: number | null | undefined;
+  decodeMs?: number | null | undefined;
+  outputTokensPerS?: number | null | undefined;
+  retry?: LlmCallRetry | null | undefined;
   requestId?: string | undefined;
   contextWindow?: number | null | undefined;
   derived?: string[] | undefined;
@@ -624,22 +631,56 @@ export interface LlmCallAttrsInit {
  * Build the attributes of an `llm.call`.
  *
  * The required keys are always present; a value the source did not map yet
- * stays `null` (full per-source mapping lives in later issues). This keeps
- * every local event valid under the stricter `llm.call` contract.
+ * stays `null`. `request_index` is provisional here: the normalizer's final
+ * pass renumbers the calls of the session in timestamp order. Retries and the
+ * derived timing fields are carried through unchanged.
  */
 export function llmCallAttrs(init: LlmCallAttrsInit = {}): Record<string, unknown> {
   const attrs: Record<string, unknown> = {
+    request_index: init.requestIndex ?? 1,
+    purpose: init.purpose ?? "chat",
     provider: init.provider ?? null,
     model: init.model ?? null,
     context_tokens: init.contextTokens ?? null,
     stop_reason: init.stopReason ?? null,
     latency_ms: init.latencyMs ?? null,
     ttft_ms: init.ttftMs ?? null,
+    decode_ms: init.decodeMs ?? null,
+    output_tokens_per_s: init.outputTokensPerS ?? null,
+    retry: init.retry ?? null,
   };
   if (init.requestId !== undefined) attrs.request_id = init.requestId;
   if (init.contextWindow !== undefined) attrs.context_window = init.contextWindow;
   if (init.derived !== undefined) attrs.derived = init.derived;
   return attrs;
+}
+
+/**
+ * Number the `llm.call` events of one session in timestamp order.
+ *
+ * The index is 1-based and is always a number, even when the source has no
+ * request id. Ties keep the order in which the normalizer emitted the events,
+ * which is the order of the source records.
+ */
+export function assignRequestIndexes(events: AgentEvent[]): AgentEvent[] {
+  const calls = events
+    .map((event, order) => ({ event, order }))
+    .filter(({ event }) => event.kind === "llm.call")
+    .sort((left, right) => {
+      const leftMs = Date.parse(left.event.ts);
+      const rightMs = Date.parse(right.event.ts);
+      if (Number.isNaN(leftMs) || Number.isNaN(rightMs)) {
+        if (left.event.ts !== right.event.ts) return left.event.ts < right.event.ts ? -1 : 1;
+      } else if (leftMs !== rightMs) {
+        return leftMs - rightMs;
+      }
+      return left.order - right.order;
+    });
+
+  calls.forEach(({ event }, index) => {
+    event.attrs.request_index = index + 1;
+  });
+  return events;
 }
 
 /* -------------------------------------------------------------------------- */

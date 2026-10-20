@@ -305,12 +305,20 @@ An unknown session is `404`.
 | `segment_id` | string | Restrict the series to one context segment. |
 | `turn_id` | string | Restrict the series to one turn. |
 
-Returns one row per `llm.call`, ordered by timestamp. `context_delta` is
-computed against the previous call **in the same segment** before filtering,
-so the first call of a segment (and the first row of a filtered segment)
-has `context_delta: null`. `watermark` is the call's `context_tokens` — the
-context-watermark chart uses it. `cache_hit_ratio` is
-`cache_read / context_tokens`. Unknown values stay `null`; they are never `0`.
+Returns one row per `llm.call`, ordered by timestamp. `request_index` is the
+1-based position of the call in its session, assigned in timestamp order (it
+is never `null`). `purpose` is `chat` for a conversation call and `compaction`
+for a call that summarized context. `context_delta` is computed against the
+previous call **in the same segment** before filtering, so the first call of a
+segment (and the first row of a filtered segment) has `context_delta: null`.
+`watermark` is the call's `context_tokens` — the context-watermark chart uses
+it. `cache_hit_ratio` is `cache_read / context_tokens`. `decode_ms` is
+`latency_ms - ttft_ms` and `output_tokens_per_s` is the output rate over that
+decode window; both are derived when their inputs are known and `null`
+otherwise. `retry` carries `{ attempt, max_attempts, delay_ms, error_code }`
+for a logical request that had to retry, or `null`; a retry never adds a row.
+`derived` names the fields whose values were derived rather than reported.
+Unknown values stay `null`; they are never `0`.
 
 ```json
 {
@@ -320,6 +328,8 @@ context-watermark chart uses it. `cache_hit_ratio` is
       "turn_id": "turn_1",
       "segment_id": "seg_0",
       "ts": "2026-01-02T03:00:03.000Z",
+      "request_index": 1,
+      "purpose": "chat",
       "model": "claude-opus",
       "context_tokens": 160,
       "context_delta": null,
@@ -333,6 +343,10 @@ context-watermark chart uses it. `cache_hit_ratio` is
       "stop_reason": "end_turn",
       "latency_ms": 2000,
       "ttft_ms": 300,
+      "decode_ms": 1700,
+      "output_tokens_per_s": 11.764705882352942,
+      "retry": null,
+      "derived": ["decode_ms", "output_tokens_per_s"],
       "usage": {
         "input_tokens": 100,
         "output_tokens": 20,

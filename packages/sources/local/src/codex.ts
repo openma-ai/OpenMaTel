@@ -46,6 +46,7 @@ import {
   SourceEventFactory,
   ToolCallRegistry,
   applyToolOutcome,
+  assignRequestIndexes,
   asBoolean,
   asNumber,
   asString,
@@ -397,12 +398,17 @@ function endTurn(state: CodexState, ts: string, ref: string, stopReason: string)
  * so the call is created when the first item shows up and completed when the
  * usage arrives.
  */
-function ensureLlmCall(state: CodexState, ts: string, ref: string): AgentEvent {
+function ensureLlmCall(
+  state: CodexState,
+  ts: string,
+  ref: string,
+  call?: { provider?: string | undefined; model?: string | undefined },
+): AgentEvent {
   if (state.pendingLlm !== undefined) return state.pendingLlm;
 
   const attrs = llmCallAttrs({
-    provider: state.provider,
-    model: state.model,
+    provider: call?.provider ?? state.provider,
+    model: call?.model ?? state.model,
     contextWindow: state.contextWindow ?? null,
   });
   // The contract lists these keys even when Codex does not provide them.
@@ -463,10 +469,13 @@ function applyUsage(
   usage: Record<string, unknown> | undefined,
   requestId?: string,
   contextWindow?: number,
+  call?: { provider?: string | undefined; model?: string | undefined },
 ): void {
   const pending = state.pendingLlm;
   if (pending === undefined) return;
 
+  if (call?.provider !== undefined) pending.attrs.provider = call.provider;
+  if (call?.model !== undefined) pending.attrs.model = call.model;
   if (contextWindow !== undefined) {
     state.contextWindow = contextWindow;
     pending.attrs.context_window = contextWindow;
@@ -692,6 +701,8 @@ function handleTurnContext(
   state: CodexState,
   payload: Record<string, unknown>,
 ): void {
+  const provider = asString(payload.model_provider) ?? asString(payload.provider);
+  if (provider !== undefined) state.provider = provider;
   const model = asString(payload.model);
   if (model !== undefined) {
     state.model = model;
@@ -748,6 +759,13 @@ function handleEventMsg(
         last,
         asString(payload.response_id) ?? asString(info?.response_id),
         contextWindow,
+        {
+          provider:
+            asString(payload.provider) ??
+            asString(payload.model_provider) ??
+            asString(info?.provider),
+          model: asString(payload.model) ?? asString(info?.model),
+        },
       );
       break;
     }
@@ -806,7 +824,10 @@ function handleResponseItem(
       }
       if (role !== "assistant") return;
 
-      ensureLlmCall(state, ts, ref);
+      ensureLlmCall(state, ts, ref, {
+        provider: asString(payload.provider),
+        model: asString(payload.model),
+      });
       const text = textFromContent(payload.content);
       if (text === "") return;
       const phase = asString(payload.phase);
@@ -830,7 +851,10 @@ function handleResponseItem(
     case "reasoning": {
       // Even an encrypted reasoning item with no readable text belongs to a
       // model call; create the call first so its usage can be attached.
-      ensureLlmCall(state, ts, ref);
+      ensureLlmCall(state, ts, ref, {
+        provider: asString(payload.provider),
+        model: asString(payload.model),
+      });
       const text = reasoningText(payload);
       if (text === "") return;
       state.events.push(
@@ -903,7 +927,10 @@ function handleToolCall(
   const outerName = asString(payload.name) ?? "tool";
   const { name, args, rawArgs } = parseCodexToolInput(outerName, payload.input ?? payload.arguments);
 
-  ensureLlmCall(state, ts, ref);
+  ensureLlmCall(state, ts, ref, {
+    provider: asString(payload.provider),
+    model: asString(payload.model),
+  });
 
   const { call, events } = createToolCall(state.factory, {
     callId,
@@ -984,6 +1011,12 @@ function handleRecord(state: CodexState, record: RawRecord): void {
         state,
         isPlainObject(payload?.usage) ? payload.usage : undefined,
         asString(payload?.response_id) ?? asString(payload?.request_id),
+        undefined,
+        {
+          provider:
+            asString(payload?.provider) ?? asString(payload?.model_provider),
+          model: asString(payload?.model),
+        },
       );
       break;
     }
@@ -1075,7 +1108,7 @@ export function normalizeFile(file: SessionFile, records: RawRecord[]): AgentEve
   }
 
   finalize(state, file, endLineOf(records));
-  return state.events;
+  return assignRequestIndexes(state.events);
 }
 
 /** Build a minimal session file for a record that arrives without one. */
@@ -1111,7 +1144,7 @@ export const codexNormalizer: Normalizer = {
     } catch {
       // A broken record must never break the whole session.
     }
-    return state.events;
+    return assignRequestIndexes(state.events);
   },
 };
 

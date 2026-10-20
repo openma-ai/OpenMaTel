@@ -39,8 +39,11 @@ import {
   FIRST_SEGMENT_ID,
   contextTokens,
   type AgentEvent,
+  type EventError,
+  type LlmCallRetry,
   type Normalizer,
   type RawRecord,
+  type Usage,
 } from "@openmatel/core";
 
 import {
@@ -48,6 +51,7 @@ import {
   SourceEventFactory,
   ToolCallRegistry,
   applyToolOutcome,
+  assignRequestIndexes,
   asBoolean,
   asNumber,
   asString,
@@ -304,6 +308,24 @@ export async function readRecordsWithStats(
 /* Normalization                                                               */
 /* -------------------------------------------------------------------------- */
 
+/** One compaction lifecycle, assembled from `compaction/*` and checkpoint records. */
+interface DshCompaction {
+  id?: string;
+  before: number | null;
+  started: boolean;
+  turn: number | null;
+  startTs?: string;
+  summary?: string;
+  summaryTs?: string;
+  endTs?: string;
+  error?: EventError;
+  provider?: string;
+  model?: string;
+  usage?: Usage;
+  callEmitted: boolean;
+  boundary?: AgentEvent;
+}
+
 /** State kept while walking the records of one session. */
 interface DshState {
   factory: SourceEventFactory;
@@ -327,12 +349,11 @@ interface DshState {
   stepStarts: Map<string, number>;
   firstTokens: Map<string, number>;
   turnLlmCalls: AgentEvent[];
-  compaction?: {
-    id?: string;
-    before: number | null;
-    summary?: string;
-    started: boolean;
-  };
+  compaction?: DshCompaction;
+  /** Retry facts by `turn:step`, waiting for the settled call. */
+  pendingRetries: Map<string, LlmCallRetry>;
+  /** Error codes seen in `assistant/attempt`, by `turn:step`. */
+  attemptErrors: Map<string, string>;
   turnIndex: number;
   turnId?: string;
   turnOpen: boolean;
@@ -353,6 +374,8 @@ function createState(file: SessionFile): DshState {
     stepStarts: new Map(),
     firstTokens: new Map(),
     turnLlmCalls: [],
+    pendingRetries: new Map(),
+    attemptErrors: new Map(),
     turnIndex: 0,
     turnOpen: false,
     toolCalls: new ToolCallRegistry(),
@@ -542,12 +565,99 @@ function noteContext(state: DshState, context: number | null): void {
   boundary.attrs.derived = context !== null;
 }
 
-/** Emit the boundary of a compaction that was started but not closed yet. */
-function emitCompactionBoundary(state: DshState, ts: string, ref: string): void {
-  const compaction = state.compaction;
-  if (compaction === undefined) return;
-  state.compaction = undefined;
-  openSegment(state, "compaction", ts, ref, compaction.summary);
+/** Create the state of a compaction that has not been seen before. */
+function newCompaction(
+  state: DshState,
+  data: Record<string, unknown> | undefined,
+  started: boolean,
+): DshCompaction {
+  return {
+    id: asString(data?.compactionId),
+    before: state.lastContextTokens,
+    started,
+    turn: asNumber(data?.turn) ?? null,
+    callEmitted: false,
+  };
+}
+
+/**
+ * Find the compaction a record belongs to.
+ *
+ * A new compaction id starts a new lifecycle; when the log is truncated and
+ * the id is missing, the open compaction is reused.
+ */
+function compactionFor(
+  state: DshState,
+  data: Record<string, unknown> | undefined,
+  started: boolean,
+): DshCompaction {
+  const id = asString(data?.compactionId);
+  const current = state.compaction;
+  if (
+    current !== undefined &&
+    (id === undefined || current.id === undefined || id === current.id)
+  ) {
+    if (current.id === undefined && id !== undefined) current.id = id;
+    return current;
+  }
+  state.compaction = newCompaction(state, data, started);
+  return state.compaction;
+}
+
+/** Attach the summary of a compaction to its boundary and content. */
+function attachCompactionSummary(compaction: DshCompaction, summary: string): void {
+  if (summary === "") return;
+  compaction.summary = summary;
+  const boundary = compaction.boundary;
+  if (boundary === undefined) return;
+  boundary.attrs.summary = summary;
+  boundary.content = { output: { text: summary }, capture: "full" };
+}
+
+/** Open the segment boundary of a compaction (once). */
+function openCompactionBoundary(
+  state: DshState,
+  compaction: DshCompaction,
+  ts: string,
+  ref: string,
+): AgentEvent {
+  if (compaction.boundary !== undefined) return compaction.boundary;
+
+  const boundary = openSegment(
+    state,
+    "compaction",
+    compaction.startTs ?? ts,
+    ref,
+    compaction.summary,
+  );
+  compaction.boundary = boundary;
+  finishCompactionBoundary(compaction);
+  return boundary;
+}
+
+/** Copy the known end/error facts onto the boundary event. */
+function finishCompactionBoundary(compaction: DshCompaction): void {
+  const boundary = compaction.boundary;
+  if (boundary === undefined) return;
+  if (compaction.endTs !== undefined) boundary.end_ts = compaction.endTs;
+  if (compaction.error !== undefined) {
+    boundary.status = "error";
+    boundary.error = compaction.error;
+  }
+}
+
+/** Parse the error of `compaction/end`, which is a string in the format. */
+function compactionError(value: unknown): EventError {
+  if (isPlainObject(value)) {
+    return {
+      type: asString(value.type) ?? "compaction_error",
+      message: asString(value.message) ?? "compaction failed",
+    };
+  }
+  return {
+    type: "compaction_error",
+    message: asString(value) ?? "compaction failed",
+  };
 }
 
 /** Use the reason of `turn/end` for a call that had no finish chunk. */
@@ -637,6 +747,21 @@ function handleUserMessage(
 ): void {
   const source = isPlainObject(data.source) ? data.source : undefined;
   const kind = asString(source?.kind);
+  // The replacement message that follows a compaction is a context
+  // checkpoint, not something the user typed (design §16.1). It belongs to
+  // the compaction boundary, never to a new turn.
+  if (kind === "compact-checkpoint") {
+    ensureSessionStart(state, ts, ref);
+    const compaction = compactionFor(
+      state,
+      { compactionId: asString(source?.compactionId), turn: data.turn },
+      false,
+    );
+    const summary = textFromContent(data.content);
+    if (compaction.summary === undefined) attachCompactionSummary(compaction, summary);
+    openCompactionBoundary(state, compaction, ts, ref);
+    return;
+  }
   // Only what the user typed is a message of the user; the runtime injects
   // instructions and context as user messages as well.
   if (kind !== undefined && kind !== "user") return;
@@ -680,7 +805,13 @@ function handleStepStart(state: DshState, data: Record<string, unknown>, ts: str
   state.stepStarts.set(stepKey(turn, step), time);
 }
 
-/** Handle the `assistant/attempt` record: keep its first-token time. */
+/**
+ * Handle the `assistant/attempt` record.
+ *
+ * It keeps the first-token time and the failure code of a settled attempt.
+ * An attempt never becomes an `llm.call`: only the final assistant message is
+ * the call, and it carries the retry facts (design §16.1).
+ */
 function handleAssistantAttempt(
   state: DshState,
   data: Record<string, unknown>,
@@ -688,11 +819,18 @@ function handleAssistantAttempt(
 ): void {
   const turn = asNumber(data.turn);
   const step = asNumber(data.step);
-  const first = firstTokenTime(data.stream);
-  if (turn === undefined || step === undefined || first === undefined) return;
-  const key = stepKey(turn, step);
-  const previous = state.firstTokens.get(key);
-  if (previous === undefined || first < previous) state.firstTokens.set(key, first);
+  if (turn !== undefined && step !== undefined) {
+    const key = stepKey(turn, step);
+    const failure = finishFailureOf(data.stream);
+    const code = asString(failure?.code) ?? asString(failure?.type);
+    if (code !== undefined) state.attemptErrors.set(key, code);
+
+    const first = firstTokenTime(data.stream);
+    if (first !== undefined) {
+      const previous = state.firstTokens.get(key);
+      if (previous === undefined || first < previous) state.firstTokens.set(key, first);
+    }
+  }
   void ts;
 }
 
@@ -803,6 +941,22 @@ function requestIdOf(
   );
 }
 
+/** The failure of a `finish` chunk, when the stream ended with an error. */
+function finishFailureOf(stream: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(stream)) return undefined;
+  let failure: Record<string, unknown> | undefined;
+  for (const record of stream) {
+    if (!isPlainObject(record) || record.type !== "chunk") continue;
+    const chunk = isPlainObject(record.chunk) ? record.chunk : undefined;
+    if (asString(chunk?.type) !== "finish") continue;
+    const finish = isPlainObject(chunk?.reason) ? chunk.reason : undefined;
+    if (asString(finish?.kind) !== "error") continue;
+    const value = isPlainObject(finish?.failure) ? finish.failure : undefined;
+    if (value !== undefined) failure = value;
+  }
+  return failure;
+}
+
 /** Handle the `assistant/message` record. */
 function handleAssistantMessage(
   state: DshState,
@@ -826,8 +980,8 @@ function handleAssistantMessage(
 
   // A truncated log may be missing `compaction/end`; a summary followed by the
   // first call of the new context is enough evidence to open the segment.
-  if (state.compaction?.summary !== undefined && state.pendingBoundary === undefined) {
-    emitCompactionBoundary(state, ts, ref);
+  if (state.compaction?.summary !== undefined && state.compaction.boundary === undefined) {
+    openCompactionBoundary(state, state.compaction, ts, ref);
   }
 
   // The reasoning of the model.
@@ -924,13 +1078,25 @@ function handleAssistantMessage(
   if (latency !== undefined) derived.push("latency_ms");
   if (ttft !== undefined) derived.push("ttft_ms");
 
+  const retry =
+    (key !== undefined ? state.pendingRetries.get(key) : undefined) ??
+    state.pendingRetries.get("*") ??
+    null;
+  if (key !== undefined) {
+    state.pendingRetries.delete(key);
+    state.attemptErrors.delete(key);
+  }
+  state.pendingRetries.delete("*");
+
   const llmAttrs = llmCallAttrs({
-    provider: state.provider,
-    model: state.model,
+    // The route belongs to this record, never to the session header.
+    provider,
+    model,
     contextTokens: context,
     stopReason: finishReasonOf(stream),
     latencyMs: latency,
     ttftMs: ttft,
+    retry,
     requestId: requestIdOf(data, message, source, usageRecord),
     contextWindow: state.contextWindow,
     derived,
@@ -1055,6 +1221,26 @@ function handleLlmRetry(
   if (provider !== undefined) attrs.provider = provider;
   const mode = asString(data.mode);
   if (mode !== undefined) attrs.mode = mode;
+
+  const turn = asNumber(data.turn);
+  const step = asNumber(data.step);
+  const key =
+    turn !== undefined && step !== undefined ? stepKey(turn, step) : undefined;
+  const errorCode =
+    asString(failure?.code) ??
+    asString(failure?.type) ??
+    (key !== undefined ? state.attemptErrors.get(key) : undefined);
+  if (attempt !== undefined) {
+    const retry: LlmCallRetry = {
+      attempt: Math.max(1, Math.trunc(attempt)),
+      max_attempts:
+        maxRetries !== undefined ? Math.max(1, Math.trunc(maxRetries)) : null,
+      delay_ms: asNumber(data.delayMs) ?? null,
+      error_code: errorCode ?? null,
+    };
+    if (key !== undefined) state.pendingRetries.set(key, retry);
+    else state.pendingRetries.set("*", retry);
+  }
 
   state.events.push(
     createDshEvent(state, {
@@ -1206,16 +1392,75 @@ function handleSessionEndSeed(
   openSegment(state, reason, ts, ref);
 }
 
+/** Token usage of a compaction summary record, when it reported one. */
+function compactionUsage(data: Record<string, unknown>): Usage | undefined {
+  const record = isPlainObject(data.usage) ? data.usage : undefined;
+  if (record === undefined) return undefined;
+  const usage = usageFrom(
+    {
+      input_tokens: asNumber(record.inputTokens) ?? null,
+      output_tokens: asNumber(record.outputTokens) ?? null,
+      cache_read_tokens: asNumber(record.cacheReadTokens) ?? null,
+      cache_write_tokens: asNumber(record.cacheWriteTokens) ?? null,
+      reasoning_tokens: asNumber(record.reasoningTokens) ?? null,
+    },
+    "harness",
+  );
+  return usage.source === "missing" ? undefined : usage;
+}
+
+/** Emit the model call that produced a compaction summary. */
+function emitCompactionCall(
+  state: DshState,
+  compaction: DshCompaction,
+  data: Record<string, unknown>,
+  ts: string,
+  ref: string,
+): void {
+  if (compaction.callEmitted || compaction.usage === undefined) return;
+
+  const attrs = llmCallAttrs({
+    purpose: "compaction",
+    // The summary record names the route that wrote it.
+    provider: asString(data.provider),
+    model: asString(data.model),
+    contextTokens: contextTokens(compaction.usage),
+    contextWindow: state.contextWindow,
+    requestId: asString(data.requestId) ?? asString(data.request_id),
+    derived: [],
+  });
+  if (attrs.request_id === undefined) attrs.request_id = null;
+  if (attrs.context_window === undefined) attrs.context_window = null;
+
+  state.events.push(
+    createDshEvent(state, {
+      line: state.scope.line,
+      sub: state.scope.next(),
+      kind: "llm.call",
+      ts,
+      turnId: state.turnId,
+      attrs,
+      usage: compaction.usage,
+      ref,
+    }),
+  );
+  compaction.callEmitted = true;
+}
+
 /** Handle the `compaction/start` record. */
 function handleCompactionStart(
   state: DshState,
   data: Record<string, unknown>,
+  ts: string,
+  ref: string,
 ): void {
-  state.compaction = {
-    id: asString(data.compactionId),
-    before: state.lastContextTokens,
-    started: true,
-  };
+  const compaction = compactionFor(state, data, true);
+  compaction.started = true;
+  compaction.startTs = ts;
+  compaction.turn = asNumber(data.turn) ?? compaction.turn;
+  // The boundary node carries the start of the operation; its summary and
+  // end are filled in by the following records.
+  openCompactionBoundary(state, compaction, ts, ref);
 }
 
 /** Handle the `compaction/summary` record. */
@@ -1225,39 +1470,41 @@ function handleCompactionSummary(
   ts: string,
   ref: string,
 ): void {
-  const id = asString(data.compactionId);
-  if (
-    state.compaction === undefined ||
-    (id !== undefined && state.compaction.id !== undefined && id !== state.compaction.id)
-  ) {
-    state.compaction = {
-      id,
-      before: state.lastContextTokens,
-      started: false,
-    };
-  }
+  const compaction = compactionFor(state, data, false);
+  compaction.summaryTs = ts;
+  compaction.turn = asNumber(data.turn) ?? compaction.turn;
+  const provider = asString(data.provider);
+  if (provider !== undefined) compaction.provider = provider;
+  const model = asString(data.model);
+  if (model !== undefined) compaction.model = model;
+  const usage = compactionUsage(data);
+  if (usage !== undefined) compaction.usage = usage;
+  attachCompactionSummary(compaction, textFromContent(data.summary));
 
-  const summary = textFromContent(data.summary);
-  if (summary !== "") state.compaction.summary = summary;
-
-  // A summary without a matching start is treated as a complete compaction
-  // record; the full format also writes `compaction/start` and `/end`.
-  if (!state.compaction.started) emitCompactionBoundary(state, ts, ref);
+  // A summary without a matching start is still a complete boundary record.
+  openCompactionBoundary(state, compaction, compaction.startTs ?? ts, ref);
+  emitCompactionCall(state, compaction, data, ts, ref);
 }
 
-/** Handle the `compaction/end` record: the new segment starts only on success. */
+/** Handle the `compaction/end` record. */
 function handleCompactionEnd(
   state: DshState,
   data: Record<string, unknown>,
   ts: string,
   ref: string,
 ): void {
-  if (state.compaction === undefined) return;
-  if (data.error !== undefined) {
-    state.compaction = undefined;
-    return;
-  }
-  emitCompactionBoundary(state, ts, ref);
+  const compaction = compactionFor(state, data, false);
+  compaction.endTs = ts;
+  if (data.error !== undefined) compaction.error = compactionError(data.error);
+
+  openCompactionBoundary(
+    state,
+    compaction,
+    compaction.startTs ?? compaction.summaryTs ?? ts,
+    ref,
+  );
+  finishCompactionBoundary(compaction);
+  state.compaction = undefined;
 }
 
 /** Handle one record of any type. */
@@ -1351,7 +1598,7 @@ function handleRecord(state: DshState, record: RawRecord): void {
       break;
     }
     case "compaction/start": {
-      if (payload) handleCompactionStart(state, payload);
+      if (payload) handleCompactionStart(state, payload, ts, ref);
       break;
     }
     case "compaction/summary": {
@@ -1391,10 +1638,20 @@ function finalize(state: DshState, file: SessionFile, endLine: number): void {
 
   if (state.sessionStart === undefined) ensureSessionStart(state, endTs, file.path);
 
-  // A truncated log may contain a summary whose `compaction/end` never made
-  // it to disk. The summary still opened a new context, so keep the boundary.
-  if (state.compaction?.summary !== undefined && state.pendingBoundary === undefined) {
-    emitCompactionBoundary(state, endTs, file.path);
+  // A truncated log may contain a compaction whose `compaction/end` never
+  // made it to disk. The boundary still opened a new context, so keep it.
+  const compaction = state.compaction;
+  if (compaction !== undefined) {
+    if (compaction.boundary === undefined) {
+      openCompactionBoundary(
+        state,
+        compaction,
+        compaction.startTs ?? compaction.summaryTs ?? endTs,
+        file.path,
+      );
+    }
+    finishCompactionBoundary(compaction);
+    state.compaction = undefined;
   }
 
   state.pendingTurn = undefined;
@@ -1444,7 +1701,7 @@ export function normalizeFile(file: SessionFile, records: RawRecord[]): AgentEve
   }
 
   finalize(state, file, endLineOf(records));
-  return state.events;
+  return assignRequestIndexes(state.events);
 }
 
 /** Build a minimal session file for a record that arrives without one. */
@@ -1481,7 +1738,7 @@ export const dshNormalizer: Normalizer = {
     } catch {
       // A broken record must never break the whole session.
     }
-    return state.events;
+    return assignRequestIndexes(state.events);
   },
 };
 

@@ -141,6 +141,11 @@ export function sinkQueryContract(
         expect(storedCall?.attrs.stop_reason).toBeNull();
         expect(storedCall?.attrs.latency_ms).toBeNull();
         expect(storedCall?.attrs.ttft_ms).toBeNull();
+        expect(storedCall?.attrs.request_index).toBe(3);
+        expect(storedCall?.attrs.purpose).toBe("chat");
+        expect(storedCall?.attrs.decode_ms).toBeNull();
+        expect(storedCall?.attrs.output_tokens_per_s).toBeNull();
+        expect(storedCall?.attrs.retry).toBeNull();
       });
     });
 
@@ -463,6 +468,8 @@ export function sinkQueryContract(
         ]);
 
         expect(calls[0]).toMatchObject({
+          request_index: 1,
+          purpose: "chat",
           segment_id: SAMPLE_SEGMENT_1,
           context_tokens: 160,
           context_delta: null,
@@ -471,13 +478,21 @@ export function sinkQueryContract(
           stop_reason: "end_turn",
           latency_ms: 1000,
           ttft_ms: 200,
+          decode_ms: 800,
+          output_tokens_per_s: 25,
+          retry: null,
           input: 100,
           cache_read: 50,
           cache_write: 10,
           output: 20,
         });
+        expect(calls[0]?.derived).toEqual(
+          expect.arrayContaining(["decode_ms", "output_tokens_per_s"]),
+        );
         expect(calls[0]?.usage?.source).toBe("provider");
         expect(calls[1]).toMatchObject({
+          request_index: 2,
+          purpose: "compaction",
           context_tokens: 50,
           context_delta: -110,
           watermark: 50,
@@ -485,15 +500,29 @@ export function sinkQueryContract(
           stop_reason: "max_tokens",
           latency_ms: null,
           ttft_ms: null,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: {
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 250,
+            error_code: "TRANSPORT",
+          },
         });
         expect(calls[2]).toMatchObject({
+          request_index: 3,
+          purpose: "chat",
           segment_id: SAMPLE_SEGMENT_2,
           context_tokens: 15,
           context_delta: null,
           watermark: 15,
           cache_hit_ratio: 5 / 15,
+          decode_ms: 400,
+          output_tokens_per_s: 12.5,
         });
         expect(calls[3]).toMatchObject({
+          request_index: 4,
+          purpose: "chat",
           context_tokens: null,
           context_delta: null,
           watermark: null,
@@ -501,6 +530,9 @@ export function sinkQueryContract(
           stop_reason: null,
           latency_ms: null,
           ttft_ms: null,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
           usage: null,
         });
 
@@ -687,12 +719,17 @@ const usageZeroSession = (): FixtureSession =>
         end_ts: "2026-02-01T09:00:02.000Z",
         status: "ok",
         attrs: {
+          request_index: 1,
+          purpose: "chat",
           provider: "anthropic",
           model: "claude-opus",
           context_tokens: null,
           stop_reason: null,
           latency_ms: null,
           ttft_ms: null,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
         },
         usage: {
           input_tokens: 0,
@@ -720,12 +757,17 @@ const usageMissingSession = (): FixtureSession =>
         end_ts: "2026-02-02T09:00:02.000Z",
         status: "ok",
         attrs: {
+          request_index: 1,
+          purpose: "chat",
           provider: null,
           model: null,
           context_tokens: null,
           stop_reason: null,
           latency_ms: null,
           ttft_ms: null,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
         },
         usage: {
           input_tokens: null,
@@ -847,12 +889,17 @@ const llmSeriesSession = (): FixtureSession =>
         end_ts: "2026-05-01T09:00:02.000Z",
         status: "ok",
         attrs: {
+          request_index: 1,
+          purpose: "chat",
           provider: "anthropic",
           model: "model-x",
           context_tokens: null,
           stop_reason: "end_turn",
           latency_ms: 1000,
           ttft_ms: 200,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
         },
         usage: {
           input_tokens: 100,
@@ -872,12 +919,22 @@ const llmSeriesSession = (): FixtureSession =>
         end_ts: "2026-05-01T09:00:03.000Z",
         status: "ok",
         attrs: {
+          request_index: 2,
+          purpose: "compaction",
           provider: "anthropic",
           model: "model-x",
           context_tokens: null,
           stop_reason: "max_tokens",
           latency_ms: null,
           ttft_ms: null,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: {
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 250,
+            error_code: "TRANSPORT",
+          },
         },
         usage: {
           input_tokens: 20,
@@ -912,12 +969,17 @@ const llmSeriesSession = (): FixtureSession =>
         end_ts: "2026-05-01T09:00:04.000Z",
         status: "ok",
         attrs: {
+          request_index: 3,
+          purpose: "chat",
           provider: "anthropic",
           model: "model-x",
           context_tokens: null,
           stop_reason: "end_turn",
           latency_ms: 500,
           ttft_ms: 100,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
         },
         usage: {
           input_tokens: 10,
@@ -938,12 +1000,17 @@ const llmSeriesSession = (): FixtureSession =>
         end_ts: "2026-05-01T09:00:05.000Z",
         status: "ok",
         attrs: {
+          request_index: 4,
+          purpose: "chat",
           provider: null,
           model: null,
           context_tokens: null,
           stop_reason: null,
           latency_ms: null,
           ttft_ms: null,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
         },
         usage: null,
       },
