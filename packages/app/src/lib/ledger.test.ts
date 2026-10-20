@@ -993,6 +993,102 @@ describe("filterLedger", () => {
   });
 });
 
+describe("firstRowIndexInTimeRange", () => {
+  const base = Date.parse("2026-10-20T00:00:00.000Z");
+
+  it("reveals the middle content row of a one-turn, 524-step session", () => {
+    const stepCount = 524;
+    const events: AgentEvent[] = [];
+    for (let step = 1; step <= stepCount; step += 1) {
+      const ts = new Date(base + step * 60_000).toISOString();
+      events.push(
+        event(`ev_llm_${step}`, "llm.call", ts, {
+          turn_id: "turn_1",
+          step_id: `st_${step}`,
+          attrs: { request_index: step },
+        }),
+        event(`ev_answer_${step}`, "message.agent", ts, {
+          turn_id: "turn_1",
+          step_id: `st_${step}`,
+          content: { capture: "full", output: { text: `answer ${step}` } },
+        }),
+      );
+    }
+
+    const rows = buildLedger({
+      segments: [segmentView("seg_0", { turn_count: 1 })],
+      turns: [
+        turnView("turn_1", "seg_0", events, {
+          prompt: "run all the steps",
+          step_count: stepCount,
+        }),
+      ],
+      calls: [],
+    });
+
+    // The header spans the whole one-turn session, so it overlaps any brush.
+    expect(rows[0]?.kind).toBe("turn_header");
+    expect(Date.parse(rows[0]!.start!)).toBe(base + 60_000);
+    expect(Date.parse(rows[0]!.end!)).toBe(base + stepCount * 60_000);
+
+    const middleStep = 262;
+    const middle = new Date(base + middleStep * 60_000).toISOString();
+    const index = firstRowIndexInTimeRange(rows, {
+      start: middle,
+      end: middle,
+    });
+
+    expect(index).toBeGreaterThan(400);
+    expect(rows[index]?.kind).toBe("assistant");
+    expect(rows[index]?.summary).toBe(`answer ${middleStep}`);
+  });
+
+  it("skips structural rows when a later turn is brushed", () => {
+    const all = buildLedger(fixture());
+    const answer = all.find(
+      (row) => row.kind === "assistant" && row.turn_id === "turn_2",
+    )!;
+
+    const index = firstRowIndexInTimeRange(all, {
+      start: Date.parse("2026-10-20T13:11:30.000Z"),
+      end: Date.parse("2026-10-20T13:12:30.000Z"),
+    });
+
+    expect(index).toBe(all.indexOf(answer));
+    expect(all[index]?.kind).toBe("assistant");
+    expect(all.slice(0, index).some((row) => row.kind === "turn_header")).toBe(true);
+  });
+
+  it("falls back to structural chrome only when there are no content rows", () => {
+    const header: LedgerRow = {
+      id: "turn:turn_1:header",
+      kind: "turn_header",
+      turn_id: "turn_1",
+      segment_id: "seg_0",
+      step: null,
+      request_index: null,
+      start: new Date(base).toISOString(),
+      end: new Date(base + 100_000).toISOString(),
+      event_ids: [],
+      summary: "Turn 1",
+      error: false,
+      status: "ok",
+    };
+    const content: LedgerRow = {
+      ...header,
+      id: "row:answer",
+      kind: "assistant",
+      start: new Date(base + 200_000).toISOString(),
+      end: new Date(base + 200_000).toISOString(),
+    };
+    const range = { start: base + 10_000, end: base + 20_000 };
+
+    expect(firstRowIndexInTimeRange([header], range)).toBe(0);
+    // Content elsewhere in the ledger must not make the spanning header win.
+    expect(firstRowIndexInTimeRange([header, content], range)).toBe(-1);
+  });
+});
+
 describe("tailWindow", () => {
   const rows = (): LedgerRow[] => buildLedger(fixture());
 

@@ -23,6 +23,7 @@ import {
   stepMatch,
   turnNumbers,
   viewportSpan,
+  windowForTarget,
   zoomViewport,
 } from "./trajectory";
 import type { LedgerRow } from "./ledger";
@@ -172,6 +173,92 @@ describe("ledger row layout", () => {
     expect(
       shouldFollowTail({ status: "running", atBottom: false, rowsGrew: false }),
     ).toBe(false);
+  });
+});
+
+describe("window for target", () => {
+  it("keeps a window that already contains the target", () => {
+    expect(
+      windowForTarget({
+        total: 1_000,
+        start: 200,
+        size: 400,
+        targetIndex: 200,
+      }),
+    ).toBe(200);
+    expect(
+      windowForTarget({
+        total: 1_000,
+        start: 200,
+        size: 400,
+        targetIndex: 599,
+      }),
+    ).toBe(200);
+  });
+
+  it("moves the window so an outside target has context before it", () => {
+    expect(
+      windowForTarget({
+        total: 1_000,
+        start: 600,
+        size: 400,
+        targetIndex: 500,
+      }),
+    ).toBe(300);
+    expect(
+      windowForTarget({
+        total: 1_000,
+        start: 600,
+        size: 400,
+        targetIndex: 100,
+      }),
+    ).toBe(0);
+  });
+
+  it("clamps the window to both ends of the row list", () => {
+    expect(
+      windowForTarget({
+        total: 1_000,
+        start: 0,
+        size: 400,
+        targetIndex: 999,
+      }),
+    ).toBe(600);
+    expect(
+      windowForTarget({
+        total: 1_000,
+        start: 200,
+        size: 400,
+        targetIndex: -10,
+      }),
+    ).toBe(0);
+    expect(
+      windowForTarget({
+        total: 50,
+        start: 100,
+        size: 400,
+        targetIndex: 49,
+      }),
+    ).toBe(0);
+  });
+
+  it("does not invent a window for an empty list or a zero size", () => {
+    expect(
+      windowForTarget({
+        total: 0,
+        start: 7,
+        size: 400,
+        targetIndex: 0,
+      }),
+    ).toBe(0);
+    expect(
+      windowForTarget({
+        total: 100,
+        start: 20,
+        size: 0,
+        targetIndex: 50,
+      }),
+    ).toBe(0);
   });
 });
 

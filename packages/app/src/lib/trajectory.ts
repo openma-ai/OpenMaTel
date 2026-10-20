@@ -293,6 +293,64 @@ export function ledgerWindowFraction(
   return { start, end: Math.max(start, end) };
 }
 
+/** Input of {@link windowForTarget}. */
+export interface WindowForTargetInput {
+  /** Number of rows in the current (filtered) ledger. */
+  total: number;
+  /** Current first row of the rendered window. */
+  start: number;
+  /** Maximum number of rows in the window. */
+  size: number;
+  /** Index of the row that must become visible. */
+  targetIndex: number;
+}
+
+/**
+ * First row of the window that reveals `targetIndex`.
+ *
+ * A window that already contains the target is kept as-is. Otherwise the target
+ * is placed around the middle of the window, leaving context before it, and the
+ * result is clamped so the window never leaves the row list. Empty lists and
+ * non-positive sizes again return a clamped start without inventing rows.
+ */
+export function windowForTarget({
+  total,
+  start,
+  size,
+  targetIndex,
+}: WindowForTargetInput): number {
+  const count = Math.max(
+    0,
+    Math.floor(Number.isFinite(total) ? total : 0),
+  );
+  if (count === 0) return 0;
+
+  const windowSize = Math.min(
+    count,
+    Math.max(0, Math.floor(Number.isFinite(size) ? size : 0)),
+  );
+  if (windowSize === 0) return 0;
+
+  const maximumStart = Math.max(0, count - windowSize);
+  const currentStart = clamp(
+    Math.floor(Number.isFinite(start) ? start : 0),
+    0,
+    maximumStart,
+  );
+  const target = clamp(
+    Math.floor(Number.isFinite(targetIndex) ? targetIndex : 0),
+    0,
+    count - 1,
+  );
+
+  if (target >= currentStart && target < currentStart + windowSize) {
+    return currentStart;
+  }
+
+  const context = Math.floor(windowSize / 2);
+  return clamp(target - context, 0, maximumStart);
+}
+
 /** Structural subset of an overview span needed to locate its ledger row. */
 export interface OverviewSpanTarget {
   id: string;

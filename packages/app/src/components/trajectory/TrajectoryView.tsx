@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -30,6 +31,7 @@ import {
   shouldFollowTail,
   stepMatch,
   turnNumbers,
+  windowForTarget,
 } from "../../lib/trajectory";
 import {
   OVERVIEW_MODES,
@@ -98,7 +100,7 @@ export function TrajectoryView({
   const [windowStart, setWindowStart] = useState(0);
   const [atBottom, setAtBottom] = useState(true);
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 0 });
-  const [revealTarget, setRevealTarget] = useState<{
+  const [pendingReveal, setPendingReveal] = useState<{
     id: string;
     nonce: number;
   } | null>(null);
@@ -107,6 +109,8 @@ export function TrajectoryView({
   const initializedRef = useRef(false);
   const previousLengthRef = useRef(0);
   const handledBrushRef = useRef(0);
+  const revealNonceRef = useRef(0);
+  const revealLockRef = useRef(false);
 
   const eventsById = useMemo(() => {
     const byId = new Map<string, AgentEvent>();
@@ -178,6 +182,9 @@ export function TrajectoryView({
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
+      // A reveal owns the scroll position until it has landed; a tail snap
+      // queued just before the reveal must not pull the ledger back down.
+      if (revealLockRef.current) return;
       ledgerRef.current?.scrollToBottom();
       setAtBottom(true);
     });
@@ -216,6 +223,7 @@ export function TrajectoryView({
 
     if (
       grew &&
+      pendingReveal === null &&
       shouldFollowTail({
         status: summary.status,
         atBottom,
@@ -225,7 +233,14 @@ export function TrajectoryView({
       setWindowStart(tailWindow(rows, { size: PAGE_SIZE }).start);
       scrollToBottom();
     }
-  }, [rows.length, atBottom, summary.status, scrollToBottom]);
+  }, [
+    rows.length,
+    atBottom,
+    pendingReveal,
+    summary.status,
+    scrollToBottom,
+    rows,
+  ]);
 
   useEffect(() => {
     setWindowStart((start) =>
@@ -245,41 +260,43 @@ export function TrajectoryView({
     if (selectedId !== null && selectedRow === null) setSelectedId(null);
   }, [selectedId, selectedRow]);
 
-  const ensureWindowIncludes = useCallback(
-    (index: number) => {
+  const requestReveal = useCallback(
+    (index: number, id: string) => {
       if (index < 0) return;
-      setWindowStart((start) => {
-        if (index < start) return Math.max(0, index - PAGE_SIZE / 2);
-        if (index >= start + PAGE_SIZE) {
-          return Math.max(0, index - PAGE_SIZE / 2);
-        }
-        return start;
-      });
+      // Asking for a specific row means the reader is no longer pinned to the
+      // live tail, even if that row happens to be close to the end.
+      setAtBottom(false);
+      revealLockRef.current = true;
+      setWindowStart((start) =>
+        windowForTarget({
+          total: rows.length,
+          start,
+          size: PAGE_SIZE,
+          targetIndex: index,
+        }),
+      );
+      revealNonceRef.current += 1;
+      setPendingReveal({ id, nonce: revealNonceRef.current });
     },
-    [],
+    [rows.length],
   );
+
+  const handleRevealHandled = useCallback((nonce: number) => {
+    setPendingReveal((current) =>
+      current !== null && current.nonce === nonce ? null : current,
+    );
+    if (revealNonceRef.current === nonce) revealLockRef.current = false;
+  }, []);
 
   const focusRow = useCallback(
     (row: LedgerRow) => {
       setSelectedId(row.id);
       setInspectorOpen(true);
       const index = rows.findIndex((candidate) => candidate.id === row.id);
-      ensureWindowIncludes(index);
-      setRevealTarget((previous) => ({
-        id: row.id,
-        nonce: (previous?.nonce ?? 0) + 1,
-      }));
+      requestReveal(index, row.id);
     },
-    [rows, ensureWindowIncludes],
+    [rows, requestReveal],
   );
-
-  useEffect(() => {
-    if (revealTarget === null) return;
-    const frame = requestAnimationFrame(() => {
-      ledgerRef.current?.scrollToRowId(revealTarget.id);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [revealTarget]);
 
   // A new brush should reveal its first row even when it is outside the
   // current tail window (or hidden by "hide others").
@@ -290,12 +307,8 @@ export function TrajectoryView({
     const index = firstRowIndexInTimeRange(rows, overviewTimeRange);
     const row = rows[index];
     if (row === undefined) return;
-    ensureWindowIncludes(index);
-    setRevealTarget((previous) => ({
-      id: row.id,
-      nonce: (previous?.nonce ?? 0) + 1,
-    }));
-  }, [brushVersion, overviewTimeRange, rows, ensureWindowIncludes]);
+    requestReveal(index, row.id);
+  }, [brushVersion, overviewTimeRange, rows, requestReveal]);
 
   const handleSelect = useCallback(
     (row: LedgerRow) => {
@@ -306,14 +319,10 @@ export function TrajectoryView({
         index >= 0 &&
         (index < visibleRange.start || index >= visibleRange.end)
       ) {
-        ensureWindowIncludes(index);
-        setRevealTarget((previous) => ({
-          id: row.id,
-          nonce: (previous?.nonce ?? 0) + 1,
-        }));
+        requestReveal(index, row.id);
       }
     },
-    [rows, visibleRange.start, visibleRange.end, ensureWindowIncludes],
+    [rows, visibleRange.start, visibleRange.end, requestReveal],
   );
 
   const toggleTurn = useCallback((turnId: string) => {
@@ -382,6 +391,29 @@ export function TrajectoryView({
 
   const safeWindowStart =
     rows.length === 0 ? 0 : Math.min(windowStart, rows.length - 1);
+
+  // The rows can change (filters, reloads) while a reveal is queued. Keep the
+  // pending target inside the window; the ledger scrolls only once it can see
+  // that row in its rendered slice.
+  useLayoutEffect(() => {
+    if (pendingReveal === null) return;
+    const index = rows.findIndex((row) => row.id === pendingReveal.id);
+    if (index < 0) {
+      revealLockRef.current = false;
+      setPendingReveal(null);
+      return;
+    }
+    if (index < safeWindowStart || index >= safeWindowStart + PAGE_SIZE) {
+      setWindowStart((start) =>
+        windowForTarget({
+          total: rows.length,
+          start,
+          size: PAGE_SIZE,
+          targetIndex: index,
+        }),
+      );
+    }
+  }, [pendingReveal, rows, safeWindowStart]);
 
   const windowFraction = useMemo(
     () =>
@@ -544,6 +576,8 @@ export function TrajectoryView({
               Math.max(0, Math.min(start, safeWindowStart) - PAGE_SIZE),
             )
           }
+          revealTarget={pendingReveal}
+          onRevealHandled={handleRevealHandled}
           onAtBottomChange={handleAtBottomChange}
           onVisibleRangeChange={handleVisibleRangeChange}
         />

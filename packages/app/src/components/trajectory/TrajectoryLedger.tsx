@@ -70,6 +70,9 @@ export interface TrajectoryLedgerProps {
   onToggleTurn: (turnId: string) => void;
   onToggleWaterfall: (turnId: string) => void;
   onLoadEarlier: () => void;
+  /** Row the parent wants to reveal once this ledger renders it. */
+  revealTarget: { id: string; nonce: number } | null;
+  onRevealHandled: (nonce: number) => void;
   onAtBottomChange: (atBottom: boolean) => void;
   onVisibleRangeChange: (range: { start: number; end: number }) => void;
   className?: string;
@@ -103,6 +106,8 @@ export const TrajectoryLedger = forwardRef<
     onToggleTurn,
     onToggleWaterfall,
     onLoadEarlier,
+    revealTarget,
+    onRevealHandled,
     onAtBottomChange,
     onVisibleRangeChange,
     className,
@@ -230,6 +235,9 @@ export const TrajectoryLedger = forwardRef<
 
   // Keep the first loaded row anchored when "Load earlier" prepends history.
   useLayoutEffect(() => {
+    // A pending reveal always wins over scroll anchoring: the user asked to
+    // move somewhere, so do not restore the old reading position underneath it.
+    if (revealTarget !== null) return;
     const pending = pendingAnchorRef.current;
     if (pending === null) return;
     const node = scrollRef.current;
@@ -241,7 +249,30 @@ export const TrajectoryLedger = forwardRef<
     );
     pendingAnchorRef.current = null;
     setScrollTop(node.scrollTop);
-  }, [layout.total]);
+  }, [layout.total, revealTarget]);
+
+  // Scroll only after the virtual list actually contains the target row. The
+  // parent first swaps in a window that includes it; this effect then runs in
+  // the same commit as that window's DOM, so the row offset is final.
+  useLayoutEffect(() => {
+    if (revealTarget === null) return;
+    pendingAnchorRef.current = null;
+    const index = items.findIndex(
+      (item) => item.type === "row" && item.row.id === revealTarget.id,
+    );
+    if (index < 0) return;
+    const node = scrollRef.current;
+    if (node === null) return;
+    const top = scrollTopForRow(layout, index);
+    // Leave room for the pinned turn header so the revealed row is not hidden
+    // underneath it.
+    node.scrollTop = Math.max(0, top - (top > 0 ? LEDGER_ROW_HEIGHT : 0));
+    setScrollTop(node.scrollTop);
+    emitAtBottom(
+      isNearBottom(node.scrollTop, node.clientHeight, node.scrollHeight),
+    );
+    onRevealHandled(revealTarget.nonce);
+  }, [revealTarget, items, layout, emitAtBottom, onRevealHandled]);
 
   const handleLoadEarlier = (): void => {
     const node = scrollRef.current;
