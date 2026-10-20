@@ -258,8 +258,25 @@ function rowOverlapsRange(
 }
 
 /**
- * Index of the first row whose effective time overlaps `range`, or `-1` when
- * no row does. Used to scroll the ledger to the start of a brushed window.
+ * Kinds that only describe the shape of the timeline. They can span a whole
+ * turn or segment, so they are poor reveal targets for a brushed range.
+ */
+const isStructuralRowKind = (kind: LedgerRowKind): boolean =>
+  kind === "turn_header" ||
+  kind === "segment_boundary" ||
+  kind === "request" ||
+  kind === "idle_gap";
+
+/**
+ * Index of the row that should be revealed for `range`, or `-1` when no row
+ * does. Used to scroll the ledger to the start of a brushed window.
+ *
+ * Structural rows (turn headers, segment boundaries, request separators and
+ * idle gaps) are skipped while a content row is available: a turn header spans
+ * the whole turn, so it would otherwise always steal the reveal. Prefer the
+ * first content row that *starts* inside the range, then the first content row
+ * that merely overlaps it. Only a ledger with no content rows at all falls back
+ * to structural chrome.
  */
 export function firstRowIndexInTimeRange(
   rows: readonly LedgerRow[],
@@ -268,6 +285,29 @@ export function firstRowIndexInTimeRange(
   const resolved = resolveTimeRange(range);
   if (resolved === null) return -1;
   const intervals = rowIntervals(rows);
+
+  let firstOverlap = -1;
+  let hasContent = false;
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (isStructuralRowKind(row.kind)) continue;
+    hasContent = true;
+
+    const interval = intervals.get(row.id);
+    if (interval === undefined || !intervalsOverlap(interval, resolved)) continue;
+    if (firstOverlap < 0) firstOverlap = index;
+
+    const ownStart = instantOf(row.start);
+    if (
+      ownStart !== null &&
+      ownStart >= resolved.start &&
+      ownStart <= resolved.end
+    ) {
+      return index;
+    }
+  }
+
+  if (hasContent) return firstOverlap;
   return rows.findIndex((row) => rowOverlapsRange(row, intervals, resolved));
 }
 
