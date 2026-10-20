@@ -7,7 +7,15 @@
  * and in the openma console.
  */
 
-import type { Page, SessionSummary, TurnNode } from "@openmatel/core";
+import type {
+  LlmCallPoint,
+  Page,
+  SegmentView,
+  SessionSummary,
+  SignalKind,
+  TurnNode,
+  TurnView,
+} from "@openmatel/core";
 
 /** Query parameters of `GET /v1/query/sessions`. */
 export interface SessionListParams {
@@ -15,6 +23,8 @@ export interface SessionListParams {
   source?: string;
   harness?: string;
   has_error?: boolean;
+  /** Only sessions with this detected signal kind. */
+  has_signal?: SignalKind;
   /** Free-text search over title, cwd and event content (`q` on the wire). */
   q?: string;
   from?: string;
@@ -29,10 +39,27 @@ export interface ObsSessionDetail {
   turns: TurnNode[];
 }
 
+/** Filter of `GET /v1/query/sessions/:id/turns`. */
+export interface SegmentFilterParams {
+  segment_id?: string;
+}
+
+/** Filter of `GET /v1/query/sessions/:id/llm-calls`. */
+export interface LlmCallParams {
+  segment_id?: string;
+  turn_id?: string;
+}
+
 /** The only data access the UI components are allowed to use. */
 export interface ObsClient {
   listSessions(params?: SessionListParams): Promise<Page<SessionSummary>>;
   getSession(id: string): Promise<ObsSessionDetail>;
+  /** The context segments of a session, with their boundary and turns. */
+  getSegments(id: string): Promise<Page<SegmentView>>;
+  /** The turn summaries of a session, optionally of one segment. */
+  getTurns(id: string, params?: SegmentFilterParams): Promise<Page<TurnView>>;
+  /** The per-call context/latency series of a session. */
+  getLlmCalls(id: string, params?: LlmCallParams): Promise<Page<LlmCallPoint>>;
 }
 
 /** Options of {@link createObsClient}. */
@@ -60,12 +87,22 @@ export class ObsApiError extends Error {
 
 const trimBase = (baseUrl: string): string => baseUrl.replace(/\/+$/, "");
 
+const filterString = (params: { segment_id?: string; turn_id?: string }): string => {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") search.set(key, value);
+  }
+  const value = search.toString();
+  return value === "" ? "" : `?${value}`;
+};
+
 const queryString = (params: SessionListParams): string => {
   const search = new URLSearchParams();
   if (params.project) search.set("project", params.project);
   if (params.source) search.set("source", params.source);
   if (params.harness) search.set("harness", params.harness);
   if (params.has_error !== undefined) search.set("has_error", String(params.has_error));
+  if (params.has_signal) search.set("has_signal", params.has_signal);
   if (params.q) search.set("q", params.q);
   if (params.from) search.set("from", params.from);
   if (params.to) search.set("to", params.to);
@@ -123,5 +160,15 @@ export function createObsClient(options: ObsClientOptions = {}): ObsClient {
       request<Page<SessionSummary>>(`/v1/query/sessions${queryString(params)}`),
     getSession: (id) =>
       request<ObsSessionDetail>(`/v1/query/sessions/${encodeURIComponent(id)}`),
+    getSegments: (id) =>
+      request<Page<SegmentView>>(`/v1/query/sessions/${encodeURIComponent(id)}/segments`),
+    getTurns: (id, params = {}) =>
+      request<Page<TurnView>>(
+        `/v1/query/sessions/${encodeURIComponent(id)}/turns${filterString(params)}`,
+      ),
+    getLlmCalls: (id, params = {}) =>
+      request<Page<LlmCallPoint>>(
+        `/v1/query/sessions/${encodeURIComponent(id)}/llm-calls${filterString(params)}`,
+      ),
   };
 }

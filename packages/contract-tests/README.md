@@ -99,10 +99,13 @@ rewrites it, and `"append"` when it checks that appended lines are picked up.
 | Idempotency | Writing the same batch twice does not duplicate events. |
 | Convergence | A child step written before its parent, and a `turn.end` written before its `turn.start`, produce the same session tree. |
 | Usage | `null` stays `null` and `0` stays `0` — in the events *and* in the `listSessions` summaries. The coverage is preserved. |
-| Session filters | `source`, `has_error`, `text` (title) and the `from`/`to` range (`from` inclusive, `to` exclusive). |
+| Session filters | `source`, `has_error`, `has_signal`, `text` (title) and the `from`/`to` range (`from` inclusive, `to` exclusive). |
 | Pagination | `limit` 2 over 5 sessions: no duplicates, no gaps, ordered by `started_at` descending and then by `session_id` ascending. The cursor is stable. |
 | Project isolation | A `project_id` filter never returns the sessions of another project. |
-| Step filters | `listSteps` filters by `kind` (one or many) and by `status`. |
+| Step filters | `listSteps` filters by `kind` (one or many), `status`, `segment_id` and `turn_id`; each step reports its `segment_id`. |
+| Segments | `getSegments` groups turns under their segment, exposes the opening boundary and aggregates the segment metrics. |
+| Turns | `getTurns` returns turn summaries with signals and prompt previews; `segment_id` filters them. |
+| LLM calls | `getLlmCalls` returns the `llmCallSeries` rows with context deltas, watermarks, cache ratios, latency/TTFT, stop reason and usage; both filters keep the deltas relative to the full segment. |
 | Content | A step captured with `capture: "none"` comes back without any input or output text. |
 | Unknown id | `getSession` returns `null` for an id that does not exist. |
 | Aggregation | When the store implements the optional `aggregate` port, every stored event is counted. |

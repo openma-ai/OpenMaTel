@@ -20,11 +20,15 @@ import { open, stat } from "node:fs/promises";
 
 import {
   buildSessionTree,
+  llmCallSeries,
+  segmentViews,
   summarizeSession,
+  turnViews,
   type AgentEvent,
   type AggQuery,
   type AggResult,
   type Bus,
+  type LlmCallFilter,
   type Page,
   type Query,
   type SessionQuery,
@@ -35,6 +39,7 @@ import {
   type Step,
   type StepQuery,
   type StepNode,
+  type TurnFilter,
   type Unsubscribe,
 } from "@openmatel/core";
 
@@ -103,6 +108,11 @@ export function createMemoryStore(): MemoryStore {
       };
     },
     listSteps: async (q: StepQuery) => listSteps(allSessions(), q),
+    getSegments: async (session_id: string) => segmentViews(eventsOf(session_id)),
+    getTurns: async (session_id: string, filter?: TurnFilter) =>
+      turnViews(eventsOf(session_id), filter),
+    getLlmCalls: async (session_id: string, filter?: LlmCallFilter) =>
+      llmCallSeries(eventsOf(session_id), filter),
     aggregate: async (q: AggQuery) => aggregate(allSessions(), q),
   };
 
@@ -176,6 +186,10 @@ const listSessions = async (
     );
     summaries = summaries.filter((summary) => withError.has(summary.session_id) === q.has_error);
   }
+  if (q.has_signal !== undefined) {
+    const kind = q.has_signal;
+    summaries = summaries.filter((summary) => (summary.signal_counts[kind] ?? 0) > 0);
+  }
   if (q.text !== undefined && q.text !== "") {
     const needle = q.text.toLowerCase();
     const eventsBySession = new Map(all);
@@ -227,23 +241,29 @@ const listSteps = async (
     }
 
     const { turns } = buildSessionTree(events);
-    const meta = new Map<string, { turn_id?: string; parent_step_id?: string }>();
+    const meta = new Map<
+      string,
+      { turn_id?: string; parent_step_id?: string; segment_id?: string }
+    >();
     for (const event of events) {
       if (!event.step_id) continue;
       const previous = meta.get(event.step_id);
       meta.set(event.step_id, {
         turn_id: event.turn_id ?? previous?.turn_id,
         parent_step_id: event.parent_step_id ?? previous?.parent_step_id,
+        segment_id: event.segment_id ?? previous?.segment_id,
       });
     }
 
     for (const turn of turns) {
       if (q.turn_id !== undefined && q.turn_id !== turn.turn_id) continue;
+      if (q.segment_id !== undefined && q.segment_id !== turn.segment_id) continue;
       for (const node of flattenSteps(turn.steps)) {
         const info = meta.get(node.step_id);
         steps.push({
           step_id: node.step_id,
           session_id,
+          segment_id: info?.segment_id ?? turn.segment_id,
           turn_id: info?.turn_id ?? turn.turn_id,
           parent_step_id: info?.parent_step_id,
           kind: node.kind,
@@ -266,6 +286,10 @@ const listSteps = async (
   }
   if (q.status !== undefined) {
     steps = steps.filter((step) => step.status === q.status);
+  }
+  if (q.segment_id !== undefined) {
+    const segment_id = q.segment_id;
+    steps = steps.filter((step) => step.segment_id === segment_id);
   }
   if (q.tool_name !== undefined) {
     steps = steps.filter((step) => step.attrs.tool_name === q.tool_name);

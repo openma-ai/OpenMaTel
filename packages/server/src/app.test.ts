@@ -3,11 +3,16 @@ import type { AddressInfo } from "node:net";
 
 import { describe, expect, it } from "vitest";
 
-import type { Query, SessionDetail } from "@openmatel/core";
+import { sessionId, type Query, type SessionDetail } from "@openmatel/core";
 import {
+  SAMPLE_SEGMENT_1,
+  SAMPLE_SEGMENT_2,
   SAMPLE_STEPS,
   SAMPLE_TITLE,
+  SAMPLE_TURN_1,
+  SAMPLE_TURN_2,
   createMemoryStore,
+  makeEvent,
   sampleSessionId,
   sampleSessions,
 } from "@openmatel/contract-tests";
@@ -269,6 +274,201 @@ describe("GET /v1/query/sessions/:id/steps", () => {
   });
 });
 
+describe("layered session query routes", () => {
+  it("returns segments with boundaries and turns", async () => {
+    const { app } = await seeded();
+    const id = sampleSessionId(PROJECT_A);
+
+    const response = await request(app, `/v1/query/sessions/${id}/segments`);
+    expect(response.status).toBe(200);
+    const body = await json<{
+      items: Array<{
+        segment_id: string;
+        boundary?: { event_id: string };
+        turn_count: number;
+        turns: Array<{ turn_id: string }>;
+      }>;
+      next_cursor: null;
+    }>(response);
+
+    expect(body.next_cursor).toBeNull();
+    expect(body.items.map((segment) => segment.segment_id)).toEqual([
+      SAMPLE_SEGMENT_1,
+      SAMPLE_SEGMENT_2,
+    ]);
+    expect(body.items[0]?.boundary).toBeUndefined();
+    expect(body.items[1]?.boundary?.event_id).toBe("ev_sample_segment_boundary");
+    expect(body.items[1]?.turn_count).toBe(1);
+    expect(body.items[1]?.turns.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_2]);
+  });
+
+  it("returns turns with summaries and signals, filtered by segment", async () => {
+    const { app } = await seeded();
+    const id = sampleSessionId(PROJECT_A);
+
+    const response = await request(app, `/v1/query/sessions/${id}/turns`);
+    expect(response.status).toBe(200);
+    const body = await json<{
+      items: Array<{
+        turn_id: string;
+        segment_id: string;
+        prompt: string | null;
+        signals: unknown[];
+        summary: { step_count: number; signals: unknown[] };
+        step_count: number;
+      }>;
+      next_cursor: null;
+    }>(response);
+
+    expect(body.items.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_1, SAMPLE_TURN_2]);
+    expect(body.items[0]?.prompt).toBe("please fix the login bug");
+    expect(body.items[0]?.signals).toEqual(body.items[0]?.summary.signals);
+    expect(body.items[0]?.step_count).toBe(body.items[0]?.summary.step_count);
+
+    const filtered = await json<{ items: Array<{ turn_id: string }> }>(
+      await request(
+        app,
+        `/v1/query/sessions/${id}/turns?segment_id=${SAMPLE_SEGMENT_2}`,
+      ),
+    );
+    expect(filtered.items.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_2]);
+  });
+
+  it("returns the LLM call series and applies both filters", async () => {
+    const { app } = await seeded();
+    const id = sampleSessionId(PROJECT_A);
+
+    const all = await json<{
+      items: Array<{
+        step_id: string;
+        segment_id: string;
+        context_tokens: number | null;
+        context_delta: number | null;
+        watermark: number | null;
+        cache_hit_ratio: number | null;
+        usage: unknown;
+      }>;
+    }>(await request(app, `/v1/query/sessions/${id}/llm-calls`));
+    expect(all.items.map((call) => call.step_id)).toEqual([
+      SAMPLE_STEPS.llm_1,
+      SAMPLE_STEPS.llm_2,
+      SAMPLE_STEPS.llm_3,
+      SAMPLE_STEPS.llm_4,
+    ]);
+    expect(all.items.every((call) => call.context_tokens === null)).toBe(true);
+    expect(all.items.every((call) => call.watermark === null)).toBe(true);
+    expect(all.items[2]?.usage).toBeNull();
+
+    const byTurn = await json<{ items: Array<{ step_id: string }> }>(
+      await request(
+        app,
+        `/v1/query/sessions/${id}/llm-calls?turn_id=${SAMPLE_TURN_1}`,
+      ),
+    );
+    expect(byTurn.items.map((call) => call.step_id)).toEqual([
+      SAMPLE_STEPS.llm_1,
+      SAMPLE_STEPS.llm_2,
+      SAMPLE_STEPS.llm_3,
+    ]);
+
+    const bySegment = await json<{ items: Array<{ step_id: string }> }>(
+      await request(
+        app,
+        `/v1/query/sessions/${id}/llm-calls?segment_id=${SAMPLE_SEGMENT_2}`,
+      ),
+    );
+    expect(bySegment.items.map((call) => call.step_id)).toEqual([SAMPLE_STEPS.llm_4]);
+  });
+
+  it("filters steps by segment and turn", async () => {
+    const { app } = await seeded();
+    const id = sampleSessionId(PROJECT_A);
+
+    const bySegment = await json<{ items: Array<{ step_id: string; segment_id?: string }> }>(
+      await request(
+        app,
+        `/v1/query/sessions/${id}/steps?segment_id=${SAMPLE_SEGMENT_2}`,
+      ),
+    );
+    expect(bySegment.items.map((step) => step.step_id)).toEqual([SAMPLE_STEPS.llm_4]);
+
+    const byTurn = await json<{ items: Array<{ step_id: string; turn_id?: string }> }>(
+      await request(
+        app,
+        `/v1/query/sessions/${id}/steps?turn_id=${SAMPLE_TURN_1}`,
+      ),
+    );
+    expect(byTurn.items.some((step) => step.step_id === SAMPLE_STEPS.llm_4)).toBe(false);
+    expect(byTurn.items.every((step) => step.turn_id === SAMPLE_TURN_1)).toBe(true);
+  });
+
+  it("filters the session list by has_signal", async () => {
+    const { app, store } = await seeded();
+    const signalSession = sessionId("server", "signals");
+    await store.sink.write([
+      makeEvent({
+        event_id: "ev_server_signal_start",
+        project_id: PROJECT_A,
+        session_id: signalSession,
+        segment_id: "seg_0",
+        kind: "session.start",
+        ts: "2026-06-01T09:00:00.000Z",
+        attrs: { harness: { name: "test" }, title: "signals" },
+      }),
+      makeEvent({
+        event_id: "ev_server_signal_interrupt",
+        project_id: PROJECT_A,
+        session_id: signalSession,
+        segment_id: "seg_0",
+        kind: "control.interrupt",
+        turn_id: "turn_server_signal_1",
+        step_id: "st_server_signal_interrupt",
+        ts: "2026-06-01T09:00:01.000Z",
+        attrs: { reason: "user" },
+      }),
+      makeEvent({
+        event_id: "ev_server_signal_correction",
+        project_id: PROJECT_A,
+        session_id: signalSession,
+        segment_id: "seg_0",
+        kind: "message.user",
+        turn_id: "turn_server_signal_2",
+        ts: "2026-06-01T09:00:02.000Z",
+        attrs: { role: "user" },
+        content: { capture: "full", input: { text: "actually, use the other file" } },
+      }),
+    ]);
+
+    const interrupted = await json<{ items: Array<{ session_id: string }> }>(
+      await request(app, "/v1/query/sessions?has_signal=user_interrupt"),
+    );
+    expect(interrupted.items.map((summary) => summary.session_id)).toEqual([signalSession]);
+
+    const corrected = await json<{ items: Array<{ session_id: string }> }>(
+      await request(app, "/v1/query/sessions?has_signal=user_correction"),
+    );
+    expect(corrected.items.map((summary) => summary.session_id)).toEqual([signalSession]);
+
+    const loop = await json<{ items: unknown[] }>(
+      await request(app, "/v1/query/sessions?has_signal=loop"),
+    );
+    expect(loop.items).toEqual([]);
+
+    const invalid = await request(app, "/v1/query/sessions?has_signal=nope");
+    expect(invalid.status).toBe(400);
+  });
+
+  it("returns 404 for an unknown session on every new route", async () => {
+    const { app } = await seeded();
+    for (const suffix of ["segments", "turns", "llm-calls"]) {
+      const response = await request(app, `/v1/query/sessions/does-not-exist/${suffix}`);
+      expect(response.status, suffix).toBe(404);
+      const body = await json<{ error: { code: string } }>(response);
+      expect(body.error.code).toBe("not_found");
+    }
+  });
+});
+
 describe("GET /v1/query/aggregate/tool-errors", () => {
   it("delegates to Query.aggregate", async () => {
     const { app } = await seeded();
@@ -304,6 +504,9 @@ describe("GET /v1/query/aggregate/tool-errors", () => {
       listSessions: store.query.listSessions,
       getSession: store.query.getSession,
       listSteps: store.query.listSteps,
+      getSegments: store.query.getSegments,
+      getTurns: store.query.getTurns,
+      getLlmCalls: store.query.getLlmCalls,
     };
     const app = createApp({ query, version: VERSION });
     const response = await request(app, "/v1/query/aggregate/tool-errors");
@@ -330,11 +533,19 @@ describe("authentication", () => {
     const app = await authed();
     expect((await request(app, "/v1/health")).status).toBe(200);
 
-    const response = await request(app, "/v1/query/sessions");
-    expect(response.status).toBe(401);
-    expect(response.headers.get("www-authenticate")).toBe("Bearer");
-    const body = await json<{ error: { code: string } }>(response);
-    expect(body.error.code).toBe("unauthorized");
+    const id = sampleSessionId(PROJECT_A);
+    for (const path of [
+      "/v1/query/sessions",
+      `/v1/query/sessions/${id}/segments`,
+      `/v1/query/sessions/${id}/turns`,
+      `/v1/query/sessions/${id}/llm-calls`,
+    ]) {
+      const response = await request(app, path);
+      expect(response.status, path).toBe(401);
+      expect(response.headers.get("www-authenticate")).toBe("Bearer");
+      const body = await json<{ error: { code: string } }>(response);
+      expect(body.error.code).toBe("unauthorized");
+    }
   });
 
   it("accepts a bearer header", async () => {
