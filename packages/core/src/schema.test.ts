@@ -172,6 +172,11 @@ describe("validateEvent", () => {
     expect(errors).toContain("attrs.stop_reason: must be present and be a string or null");
     expect(errors).toContain("attrs.latency_ms: must be present and be a number or null");
     expect(errors).toContain("attrs.ttft_ms: must be present and be a number or null");
+    expect(errors).toContain("attrs.request_index: must be present and be a positive integer");
+    expect(errors).toContain("attrs.purpose: must be present and be one of chat, compaction or null");
+    expect(errors).toContain("attrs.decode_ms: must be present and be a number or null");
+    expect(errors).toContain("attrs.output_tokens_per_s: must be present and be a number or null");
+    expect(errors).toContain("attrs.retry: must be present and be an object or null");
   });
 
   it("accepts an llm.call whose required attributes are explicitly null", () => {
@@ -179,18 +184,65 @@ describe("validateEvent", () => {
     event.kind = "llm.call";
     event.step_id = "st_llm";
     event.attrs = {
+      request_index: 1,
+      purpose: "chat",
       provider: null,
       model: null,
       context_tokens: null,
       stop_reason: null,
       latency_ms: null,
       ttft_ms: null,
+      decode_ms: null,
+      output_tokens_per_s: null,
+      retry: null,
       request_id: null,
       context_window: null,
       derived: ["context_tokens"],
     };
     event.usage = null;
     expect(validateEvent(event)).toEqual({ ok: true });
+  });
+
+  it("validates the request index, purpose and retry of an llm.call", () => {
+    const event = validEvent();
+    event.kind = "llm.call";
+    event.step_id = "st_llm";
+    event.attrs = {
+      request_index: 2,
+      purpose: "compaction",
+      provider: "p",
+      model: "m",
+      context_tokens: null,
+      stop_reason: null,
+      latency_ms: 100,
+      ttft_ms: 40,
+      decode_ms: 60,
+      output_tokens_per_s: 10,
+      retry: { attempt: 1, max_attempts: 3, delay_ms: 250, error_code: "TRANSPORT" },
+    };
+    event.usage = null;
+    expect(validateEvent(event)).toEqual({ ok: true });
+
+    event.attrs = { ...event.attrs, request_index: null };
+    expect(errorsOf(event)).toContain(
+      "attrs.request_index: must be present and be a positive integer",
+    );
+
+    event.attrs = { ...event.attrs, request_index: 1, purpose: "other" };
+    expect(errorsOf(event)).toContain(
+      "attrs.purpose: must be one of chat, compaction or null",
+    );
+
+    event.attrs = {
+      ...event.attrs,
+      purpose: "chat",
+      retry: { attempt: 0, max_attempts: 0, delay_ms: -1, error_code: 42 },
+    };
+    const retryErrors = errorsOf(event);
+    expect(retryErrors).toContain("attrs.retry.attempt: must be a positive integer");
+    expect(retryErrors).toContain("attrs.retry.max_attempts: must be a positive integer or null");
+    expect(retryErrors).toContain("attrs.retry.delay_ms: must be a non-negative number or null");
+    expect(retryErrors).toContain("attrs.retry.error_code: must be a string or null");
   });
 
   it("accepts a segment.boundary event", () => {

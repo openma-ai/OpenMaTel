@@ -43,6 +43,7 @@ import {
   SourceEventFactory,
   ToolCallRegistry,
   applyToolOutcome,
+  assignRequestIndexes,
   asBoolean,
   asNumber,
   asString,
@@ -577,8 +578,9 @@ function handleAssistantMessage(
   const requestId =
     asString(message.responseId) ?? asString(message.requestId) ?? asString(message.request_id);
   const llmAttrs = llmCallAttrs({
-    provider: state.provider,
-    model: state.model,
+    // The route belongs to this message, not to the session header.
+    provider,
+    model,
     contextTokens: context,
     stopReason,
     requestId,
@@ -815,7 +817,7 @@ export function normalizeFile(file: SessionFile, records: RawRecord[]): AgentEve
   }
 
   finalize(state, file, endLineOf(records));
-  return state.events;
+  return assignRequestIndexes(state.events);
 }
 
 /** Build a minimal session file for a record that arrives without one. */
@@ -851,7 +853,7 @@ export const piNormalizer: Normalizer = {
     } catch {
       // A broken record must never break the whole session.
     }
-    return state.events;
+    return assignRequestIndexes(state.events);
   },
 };
 

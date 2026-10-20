@@ -200,12 +200,17 @@ describe("@openmatel/source-local — pi", () => {
     expect(first.segment_id).toBe("seg_0");
     expect(first.turn_id).toBeDefined();
     expect(first.attrs).toMatchObject({
+      request_index: 1,
+      purpose: "chat",
       provider: "deepseek",
       model: "deepseek-v4-pro",
       context_tokens: 1416 + 384 + 0,
       stop_reason: "toolUse",
       latency_ms: null,
       ttft_ms: null,
+      decode_ms: null,
+      output_tokens_per_s: null,
+      retry: null,
       request_id: "3a007498-d1b6-4240-991d-eed1e0691619",
       context_window: null,
       derived: [],
@@ -213,6 +218,7 @@ describe("@openmatel/source-local — pi", () => {
 
     const second = calls[1];
     expect(second.segment_id).toBe("seg_0");
+    expect(second.attrs.request_index).toBe(2);
     expect(second.attrs.context_tokens).toBe(110 + 1792 + 0);
     expect(second.attrs.stop_reason).toBe("stop");
     expect(second.attrs.latency_ms).toBeNull();
@@ -272,6 +278,8 @@ describe("@openmatel/source-local — pi", () => {
     expect(fork.content?.output?.text).toBe("Synthetic summary of the abandoned branch.");
 
     const calls = eventsOfKind(compactionEvents, "llm.call");
+    expect(calls.map((call) => call.attrs.request_index)).toEqual([1, 2, 3, 4, 5]);
+    expect(calls.every((call) => call.attrs.purpose === "chat")).toBe(true);
     expect(calls.map((call) => call.segment_id)).toEqual([
       "seg_0",
       "seg_1",

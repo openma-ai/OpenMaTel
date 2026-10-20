@@ -341,11 +341,17 @@ describe("layered session query routes", () => {
     const all = await json<{
       items: Array<{
         step_id: string;
+        request_index: number;
+        purpose: string | null;
         segment_id: string;
         context_tokens: number | null;
         context_delta: number | null;
         watermark: number | null;
         cache_hit_ratio: number | null;
+        decode_ms: number | null;
+        output_tokens_per_s: number | null;
+        retry: unknown;
+        derived: string[];
         usage: unknown;
       }>;
     }>(await request(app, `/v1/query/sessions/${id}/llm-calls`));
@@ -357,6 +363,11 @@ describe("layered session query routes", () => {
     ]);
     expect(all.items.every((call) => call.context_tokens === null)).toBe(true);
     expect(all.items.every((call) => call.watermark === null)).toBe(true);
+    expect(all.items.map((call) => call.request_index)).toEqual([1, 2, 3, 4]);
+    expect(all.items.every((call) => call.purpose === "chat")).toBe(true);
+    expect(all.items.every((call) => call.decode_ms === null)).toBe(true);
+    expect(all.items.every((call) => call.output_tokens_per_s === null)).toBe(true);
+    expect(all.items.every((call) => call.retry === null)).toBe(true);
     expect(all.items[2]?.usage).toBeNull();
 
     const byTurn = await json<{ items: Array<{ step_id: string }> }>(

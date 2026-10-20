@@ -404,6 +404,31 @@ export interface PlanUpdateAttrs {
   entries: PlanEntry[];
 }
 
+/** Why a model call was made (design §16.1). */
+export type LlmCallPurpose = "chat" | "compaction";
+
+/** Runtime list of every known {@link LlmCallPurpose}. */
+export const LLM_CALL_PURPOSES = ["chat", "compaction"] as const satisfies readonly LlmCallPurpose[];
+
+/**
+ * Retry information of a model call (design §16.1).
+ *
+ * `attempt` is the 1-based attempt number of the logical request. Retries do
+ * not create an extra `llm.call`: the call that finally succeeds carries the
+ * retry record of the attempts that preceded it. A value the source did not
+ * report is `null`, never a made-up zero.
+ */
+export interface LlmCallRetry {
+  /** 1-based attempt number within the logical request. */
+  attempt: number;
+  /** Total number of attempts, when the source reported the cap. */
+  max_attempts: number | null;
+  /** Delay before this attempt, in milliseconds. */
+  delay_ms: number | null;
+  /** Machine-readable error code of the failed attempt, when known. */
+  error_code: string | null;
+}
+
 /**
  * `llm.call` attributes.
  *
@@ -412,10 +437,21 @@ export interface PlanUpdateAttrs {
  * (all three must be known, otherwise it is `null`). `usage.input_tokens`
  * itself is always **uncached** input (design §15.5).
  *
- * The required keys are present even when the source did not report the value
- * — unknown is `null`, never a made-up zero.
+ * `request_index` numbers the calls of one session in timestamp order,
+ * starting at 1 (design §16.1). It is never `null`: every normalized call has
+ * a position even when the source did not report a request id.
+ *
+ * `decode_ms` is the time spent after the first token
+ * (`latency_ms - ttft_ms`); `output_tokens_per_s` is the output rate over
+ * that decode window. Both are derived when the inputs are known and are
+ * `null` otherwise. The keys are present even when the source did not report
+ * the value — unknown is `null`, never a made-up zero.
  */
 export interface LlmCallAttrs {
+  /** 1-based position of the call in its session, in timestamp order. */
+  request_index: number;
+  /** Whether the call served the conversation or a context compaction. */
+  purpose: LlmCallPurpose | null;
   provider: string | null;
   model: string | null;
   context_tokens: number | null;
@@ -424,6 +460,12 @@ export interface LlmCallAttrs {
   latency_ms: number | null;
   /** Time to first token, in milliseconds. */
   ttft_ms: number | null;
+  /** Decode time after the first token, in milliseconds. */
+  decode_ms: number | null;
+  /** Output tokens divided by the decode time in seconds. */
+  output_tokens_per_s: number | null;
+  /** Retry information of the logical request, when the source exposed it. */
+  retry: LlmCallRetry | null;
   request_id?: string | null;
   /** Context window of the model, when the source reported it. */
   context_window?: number | null;
@@ -536,6 +578,7 @@ const STEP_STATUS_SET: ReadonlySet<string> = new Set(STEP_STATUSES);
 const CONTENT_CAPTURE_SET: ReadonlySet<string> = new Set(CONTENT_CAPTURES);
 const USAGE_SOURCE_SET: ReadonlySet<string> = new Set(USAGE_SOURCES);
 const COST_SOURCE_SET: ReadonlySet<string> = new Set(COST_SOURCES);
+const LLM_CALL_PURPOSE_SET: ReadonlySet<string> = new Set(LLM_CALL_PURPOSES);
 
 /** ISO-8601 instant: `2026-01-02T03:04:05Z`, with optional fraction and offset. */
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -625,13 +668,59 @@ const REQUIRED_LLM_ATTRS = [
   "stop_reason",
   "latency_ms",
   "ttft_ms",
+  "purpose",
+  "decode_ms",
+  "output_tokens_per_s",
 ] as const;
 
+const isPositiveInteger = (value: unknown): value is number =>
+  isFiniteNumber(value) && Number.isInteger(value) && value >= 1;
+
+const validateLlmCallRetry = (retry: unknown, errors: string[]): void => {
+  if (retry === null) return;
+  if (!isPlainObject(retry)) {
+    errors.push("attrs.retry: must be an object or null");
+    return;
+  }
+
+  const attempt = retry.attempt;
+  if (!isPositiveInteger(attempt)) {
+    errors.push("attrs.retry.attempt: must be a positive integer");
+  }
+  const maxAttempts = retry.max_attempts;
+  if (maxAttempts !== null && !isPositiveInteger(maxAttempts)) {
+    errors.push("attrs.retry.max_attempts: must be a positive integer or null");
+  }
+  const delay = retry.delay_ms;
+  if (delay !== null && (!isFiniteNumber(delay) || delay < 0)) {
+    errors.push("attrs.retry.delay_ms: must be a non-negative number or null");
+  }
+  const errorCode = retry.error_code;
+  if (errorCode !== null && typeof errorCode !== "string") {
+    errors.push("attrs.retry.error_code: must be a string or null");
+  }
+  for (const key of ["max_attempts", "delay_ms", "error_code"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(retry, key)) {
+      errors.push(`attrs.retry.${key}: must be present and be null or a known value`);
+    }
+  }
+};
+
 const validateLlmCallAttrs = (attrs: Record<string, unknown>, errors: string[]): void => {
-  const numericKeys = new Set<string>(["context_tokens", "latency_ms", "ttft_ms"]);
+  const numericKeys = new Set<string>([
+    "context_tokens",
+    "latency_ms",
+    "ttft_ms",
+    "decode_ms",
+    "output_tokens_per_s",
+  ]);
 
   for (const key of REQUIRED_LLM_ATTRS) {
-    const expected = numericKeys.has(key) ? "a number or null" : "a string or null";
+    const expected = numericKeys.has(key)
+      ? "a number or null"
+      : key === "purpose"
+        ? "one of chat, compaction or null"
+        : "a string or null";
     if (!Object.prototype.hasOwnProperty.call(attrs, key)) {
       errors.push(`attrs.${key}: must be present and be ${expected}`);
       continue;
@@ -640,9 +729,24 @@ const validateLlmCallAttrs = (attrs: Record<string, unknown>, errors: string[]):
     if (value === null) continue;
     if (numericKeys.has(key)) {
       if (!isFiniteNumber(value)) errors.push(`attrs.${key}: must be ${expected}`);
+    } else if (key === "purpose") {
+      if (typeof value !== "string" || !LLM_CALL_PURPOSE_SET.has(value)) {
+        errors.push(`attrs.${key}: must be ${expected}`);
+      }
     } else if (typeof value !== "string") {
       errors.push(`attrs.${key}: must be ${expected}`);
     }
+  }
+
+  const requestIndex = attrs.request_index;
+  if (!isPositiveInteger(requestIndex)) {
+    errors.push("attrs.request_index: must be present and be a positive integer");
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(attrs, "retry")) {
+    errors.push("attrs.retry: must be present and be an object or null");
+  } else {
+    validateLlmCallRetry(attrs.retry, errors);
   }
 
   // The optional fields may be absent, but when they are present they must

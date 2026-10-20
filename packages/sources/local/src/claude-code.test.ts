@@ -178,16 +178,22 @@ describe("@openmatel/source-local — Claude Code", () => {
 
     const first = calls[0];
     expect(first.attrs).toMatchObject({
+      request_index: 1,
+      purpose: "chat",
       provider: "anthropic",
       model: "claude-opus-5-5",
       context_tokens: 31168,
       stop_reason: "tool_use",
       latency_ms: 4750,
       ttft_ms: null,
+      decode_ms: null,
+      output_tokens_per_s: null,
+      retry: null,
       request_id: "req_011Cg9kHaopeX3fHZNpzZwGa",
       context_window: null,
       derived: ["latency_ms"],
     });
+    expect(calls.map((call) => call.attrs.request_index)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(first.usage?.input_tokens).toBe(2);
     expect(first.usage?.cache_read_tokens).toBe(10420);
     expect(first.usage?.cache_write_tokens).toBe(20746);
@@ -197,12 +203,17 @@ describe("@openmatel/source-local — Claude Code", () => {
     // Each required key is present even when the source did not report it.
     for (const call of calls) {
       for (const key of [
+        "request_index",
+        "purpose",
         "provider",
         "model",
         "context_tokens",
         "stop_reason",
         "latency_ms",
         "ttft_ms",
+        "decode_ms",
+        "output_tokens_per_s",
+        "retry",
         "request_id",
         "context_window",
         "derived",

@@ -33,6 +33,7 @@ import os from "node:os";
 import {
   contextTokens,
   type AgentEvent,
+  type LlmCallRetry,
   type Normalizer,
   type RawRecord,
 } from "@openmatel/core";
@@ -42,6 +43,7 @@ import {
   SourceEventFactory,
   ToolCallRegistry,
   applyToolOutcome,
+  assignRequestIndexes,
   asBoolean,
   asNumber,
   asString,
@@ -206,6 +208,8 @@ interface ClaudeState {
   sawConversation: boolean;
   /** Latest timestamp of any record of the file, for the closing events. */
   latestRecordTs?: string;
+  /** Retry reported by a `system` error, applied to the next model call. */
+  pendingRetry?: LlmCallRetry;
 }
 
 /** Create the state for one session file. */
@@ -638,6 +642,7 @@ function startLlmCall(
   state: ClaudeState,
   record: Record<string, unknown>,
   message: Record<string, unknown> | undefined,
+  provider: string,
   model: string | undefined,
   requestId: string | undefined,
   ts: string,
@@ -655,16 +660,18 @@ function startLlmCall(
   const context = contextTokens(usage);
   const contextWindow = contextWindowOf(state, record, usageRecord, requestRef);
   const attrs = llmCallAttrs({
-    provider: "anthropic",
+    provider,
     model,
     contextTokens: context,
     stopReason: asString(message?.stop_reason),
     latencyMs: requestStart !== undefined ? elapsedMs(requestStart, ts) : null,
     ttftMs: null,
+    retry: state.pendingRetry ?? null,
     requestId,
     contextWindow,
     derived: requestStart !== undefined ? ["latency_ms"] : [],
   });
+  state.pendingRetry = undefined;
   // The contract lists these fields even when the source did not report them.
   attrs.request_id = requestId ?? null;
   attrs.context_window = contextWindow;
@@ -698,6 +705,7 @@ function updateLlmCall(
   pending: PendingLlmCall,
   record: Record<string, unknown>,
   message: Record<string, unknown> | undefined,
+  provider: string | undefined,
   model: string | undefined,
   requestId: string | undefined,
   ts: string,
@@ -711,6 +719,7 @@ function updateLlmCall(
   const attrs = pending.event.attrs;
   attrs.context_tokens = context;
 
+  if (provider !== undefined) attrs.provider = provider;
   if (model !== undefined) attrs.model = model;
   if (requestId !== undefined) attrs.request_id = requestId;
   if (message !== undefined && Object.prototype.hasOwnProperty.call(message, "stop_reason")) {
@@ -753,6 +762,10 @@ function handleAssistant(
   const rawModel = asString(message?.model);
   const synthetic = rawModel !== undefined && rawModel.trim().toLowerCase() === SYNTHETIC_MODEL;
   const model = realModel(rawModel);
+  const provider =
+    asString(message?.provider) ??
+    asString(record.provider) ??
+    "anthropic";
   if (model !== undefined) {
     state.model = model;
     if (state.sessionStart) state.sessionStart.attrs.model = model;
@@ -767,9 +780,9 @@ function handleAssistant(
     const requestId = asString(record.requestId);
     let pending = findPendingLlm(state, messageId, requestId);
     if (pending === undefined) {
-      pending = startLlmCall(state, record, message, model, requestId, ts, ref);
+      pending = startLlmCall(state, record, message, provider, model, requestId, ts, ref);
     } else {
-      updateLlmCall(state, pending, record, message, model, requestId, ts);
+      updateLlmCall(state, pending, record, message, provider, model, requestId, ts);
     }
   }
 
@@ -867,6 +880,16 @@ function handleSystem(state: ClaudeState, record: Record<string, unknown>, ts: s
     if (attempt !== undefined) attrs.retry_attempt = attempt;
     const maxRetries = asNumber(record.maxRetries);
     if (maxRetries !== undefined) attrs.max_retries = maxRetries;
+    const errorCode = asString(error?.code) ?? asString(error?.type) ?? asString(record.error);
+    if (attempt !== undefined) {
+      state.pendingRetry = {
+        attempt: Math.max(1, Math.trunc(attempt)),
+        max_attempts:
+          maxRetries !== undefined ? Math.max(1, Math.trunc(maxRetries)) : null,
+        delay_ms: null,
+        error_code: errorCode ?? null,
+      };
+    }
     state.events.push(
       createEvent(state, {
         line: state.scope.line,
@@ -1142,7 +1165,7 @@ export function normalizeFile(file: SessionFile, records: RawRecord[]): AgentEve
   }
 
   finalize(state, file, endLineOf(records));
-  return state.events;
+  return assignRequestIndexes(state.events);
 }
 
 /** Build a minimal session file for a record that arrives without one. */
@@ -1177,7 +1200,7 @@ export const claudeCodeNormalizer: Normalizer = {
     } catch {
       // A broken record must never break the whole session.
     }
-    return state.events;
+    return assignRequestIndexes(state.events);
   },
 };
 

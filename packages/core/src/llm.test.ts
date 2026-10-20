@@ -116,6 +116,80 @@ describe("llmCallSeries", () => {
     });
   });
 
+  it("exposes request index, purpose, retry and derives decode throughput", () => {
+    const series = llmCallSeries([
+      call("ev_late", "2026-01-01T00:00:02.000Z", "seg_0", {
+        step_id: "st_2",
+        usage: usage({ output_tokens: 25 }),
+        attrs: {
+          request_index: 2,
+          purpose: "compaction",
+          provider: "anthropic",
+          model: "claude-opus",
+          context_tokens: null,
+          stop_reason: "end_turn",
+          latency_ms: 1000,
+          ttft_ms: 200,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: {
+            attempt: 2,
+            max_attempts: 3,
+            delay_ms: 250,
+            error_code: "TRANSPORT",
+          },
+          derived: ["latency_ms", "ttft_ms"],
+        },
+      }),
+      call("ev_early", "2026-01-01T00:00:01.000Z", "seg_0", {
+        step_id: "st_1",
+        usage: usage({ output_tokens: 4 }),
+        attrs: {
+          request_index: 1,
+          purpose: "chat",
+          provider: "anthropic",
+          model: "claude-opus",
+          context_tokens: null,
+          stop_reason: "end_turn",
+          latency_ms: 500,
+          ttft_ms: 500,
+          decode_ms: null,
+          output_tokens_per_s: null,
+          retry: null,
+          derived: ["latency_ms", "ttft_ms"],
+        },
+      }),
+    ]);
+
+    expect(series.map((point) => point.request_index)).toEqual([1, 2]);
+    expect(series[0]?.purpose).toBe("chat");
+    expect(series[0]?.decode_ms).toBe(0);
+    // A zero decode window has no meaningful rate.
+    expect(series[0]?.output_tokens_per_s).toBeNull();
+    expect(series[0]?.derived).toEqual(["latency_ms", "ttft_ms", "decode_ms"]);
+    expect(series[1]?.purpose).toBe("compaction");
+    expect(series[1]?.decode_ms).toBe(800);
+    expect(series[1]?.output_tokens_per_s).toBeCloseTo(31.25, 10);
+    expect(series[1]?.retry).toEqual({
+      attempt: 2,
+      max_attempts: 3,
+      delay_ms: 250,
+      error_code: "TRANSPORT",
+    });
+    expect(series[1]?.derived).toContain("decode_ms");
+    expect(series[1]?.derived).toContain("output_tokens_per_s");
+  });
+
+  it("falls back to a 1-based position when stored request indexes are absent", () => {
+    const series = llmCallSeries([
+      call("ev_b", "2026-01-01T00:00:02.000Z", "seg_0", { step_id: "st_b" }),
+      call("ev_a", "2026-01-01T00:00:01.000Z", "seg_0", { step_id: "st_a" }),
+    ]);
+    expect(series.map((point) => point.request_index)).toEqual([1, 2]);
+    expect(series.every((point) => point.purpose === null)).toBe(true);
+    expect(series.every((point) => point.retry === null)).toBe(true);
+  });
+
   it("keeps unknown attrs null and ignores non-llm events", () => {
     const tool: AgentEvent = {
       ...call("ev_tool", "2026-01-01T00:00:00.000Z", "seg_0"),

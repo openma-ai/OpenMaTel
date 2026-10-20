@@ -17,6 +17,8 @@
 import {
   FIRST_SEGMENT_ID,
   type AgentEvent,
+  type LlmCallPurpose,
+  type LlmCallRetry,
   type Usage,
 } from "./schema.js";
 
@@ -51,6 +53,10 @@ export interface LlmCallPoint {
   turn_id: string | null;
   segment_id: string;
   ts: string;
+  /** 1-based position of the call in its session, in timestamp order. */
+  request_index: number;
+  /** Whether the call served the conversation or a context compaction. */
+  purpose: LlmCallPurpose | null;
   model: string | null;
   context_tokens: number | null;
   /** Change against the previous call in the same segment, or `null`. */
@@ -71,6 +77,14 @@ export interface LlmCallPoint {
   stop_reason: string | null;
   latency_ms: number | null;
   ttft_ms: number | null;
+  /** Decode time after the first token, in milliseconds. */
+  decode_ms: number | null;
+  /** Output tokens divided by the decode time in seconds. */
+  output_tokens_per_s: number | null;
+  /** Retry information of the logical request, when known. */
+  retry: LlmCallRetry | null;
+  /** Names of the fields that were derived rather than reported. */
+  derived: string[];
   /** The raw usage record of the call, or `null` when the source gave none. */
   usage: Usage | null;
 }
@@ -89,6 +103,32 @@ const asString = (value: unknown): string | null =>
 
 const asNumber = (value: unknown): number | null =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const asPositiveInteger = (value: unknown): number | null =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+
+const asDerived = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((field): field is string => typeof field === "string")
+    : [];
+
+const asPurpose = (value: unknown): LlmCallPurpose | null =>
+  value === "chat" || value === "compaction" ? value : null;
+
+const asRetry = (value: unknown): LlmCallRetry | null => {
+  if (!isObject(value)) return null;
+  const attempt = asPositiveInteger(value.attempt);
+  if (attempt === null) return null;
+  const maxAttempts = asPositiveInteger(value.max_attempts);
+  const delayMs = asNumber(value.delay_ms);
+  const errorCode = asString(value.error_code);
+  return {
+    attempt,
+    max_attempts: maxAttempts,
+    delay_ms: delayMs,
+    error_code: errorCode,
+  };
+};
 
 const segmentOf = (event: AgentEvent): string =>
   typeof event.segment_id === "string" && event.segment_id !== ""
@@ -135,7 +175,7 @@ export function llmCallSeries(events: AgentEvent[], filter: LlmCallFilter = {}):
   const previousBySegment = new Map<string, number | null>();
   const points: LlmCallPoint[] = [];
 
-  for (const event of ordered) {
+  ordered.forEach((event, order) => {
     const attrs = isObject(event.attrs) ? event.attrs : {};
     const usage = event.usage ?? null;
     const segment_id = segmentOf(event);
@@ -153,11 +193,39 @@ export function llmCallSeries(events: AgentEvent[], filter: LlmCallFilter = {}):
         ? null
         : cacheRead / context_tokens;
 
+    const latency_ms = asNumber(attrs.latency_ms);
+    const ttft_ms = asNumber(attrs.ttft_ms);
+    const output = usage ? asNumber(usage.output_tokens) : null;
+    const derived = asDerived(attrs.derived);
+
+    // The source may already have filled these in (and marked them derived).
+    // When latency and TTFT are both known we recompute from the primitives so
+    // every source exposes the same numbers.
+    const computedDecode =
+      latency_ms !== null && ttft_ms !== null ? latency_ms - ttft_ms : null;
+    const decode_ms = computedDecode ?? asNumber(attrs.decode_ms);
+    if (computedDecode !== null && !derived.includes("decode_ms")) {
+      derived.push("decode_ms");
+    }
+
+    let output_tokens_per_s = asNumber(attrs.output_tokens_per_s);
+    if (decode_ms !== null && decode_ms > 0 && output !== null) {
+      output_tokens_per_s = output / (decode_ms / 1000);
+      if (!derived.includes("output_tokens_per_s")) {
+        derived.push("output_tokens_per_s");
+      }
+    } else if (computedDecode !== null) {
+      // A zero-length decode window has no meaningful rate.
+      output_tokens_per_s = null;
+    }
+
     points.push({
       step_id: asString(event.step_id),
       turn_id: asString(event.turn_id),
       segment_id,
       ts: event.ts,
+      request_index: asPositiveInteger(attrs.request_index) ?? order + 1,
+      purpose: asPurpose(attrs.purpose),
       model: asString(attrs.model),
       context_tokens,
       context_delta,
@@ -166,16 +234,20 @@ export function llmCallSeries(events: AgentEvent[], filter: LlmCallFilter = {}):
       input: usage ? asNumber(usage.input_tokens) : null,
       cache_read: cacheRead,
       cache_write: usage ? asNumber(usage.cache_write_tokens) : null,
-      output: usage ? asNumber(usage.output_tokens) : null,
+      output,
       reasoning: usage ? asNumber(usage.reasoning_tokens) : null,
       stop_reason: asString(attrs.stop_reason),
-      latency_ms: asNumber(attrs.latency_ms),
-      ttft_ms: asNumber(attrs.ttft_ms),
+      latency_ms,
+      ttft_ms,
+      decode_ms,
+      output_tokens_per_s,
+      retry: asRetry(attrs.retry),
+      derived,
       usage,
     });
 
     previousBySegment.set(segment_id, context_tokens);
-  }
+  });
 
   if (filter.segment_id === undefined && filter.turn_id === undefined) return points;
   return points.filter(

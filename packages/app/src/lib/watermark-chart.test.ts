@@ -19,6 +19,8 @@ const call = (
   turn_id: `turn_${index}`,
   segment_id,
   ts: `2026-10-20T10:00:0${index}.000Z`,
+  request_index: index,
+  purpose: "chat",
   model: "test-model",
   context_tokens,
   context_delta: null,
@@ -32,6 +34,10 @@ const call = (
   stop_reason: null,
   latency_ms: null,
   ttft_ms: null,
+  decode_ms: null,
+  output_tokens_per_s: null,
+  retry: null,
+  derived: [],
   usage: null,
 });
 
