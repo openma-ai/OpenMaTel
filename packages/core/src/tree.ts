@@ -116,6 +116,65 @@ export interface SegmentNode {
   turns: TurnNode[];
 }
 
+/**
+ * A turn as returned by the Query port.
+ *
+ * It is the complete {@link TurnNode} (so a caller can render the turn without
+ * loading the whole session) plus the summary fields flattened onto the row and
+ * a few conveniences used by the default turn view. The nested `summary` is the
+ * same object as the flat fields; both spellings are supported so a client can
+ * use whichever is clearer.
+ */
+export interface TurnView extends TurnNode {
+  /** Signals of the turn; the same list as `summary.signals`. */
+  signals: Signal[];
+  /** First real user message of the turn, when its text was captured. */
+  prompt: string | null;
+  /** Sum of `context_tokens` over the turn's model calls, or `null`. */
+  tokens_in: number | null;
+  /** Sum of reported output tokens over the turn's model calls, or `null`. */
+  output_tokens: number | null;
+  step_count: number;
+  tool_call_count: number;
+  tool_error_count: number;
+  llm_calls: number;
+  usage: UsageTotal;
+  context_tokens_peak: number | null;
+  wall_ms: number | null;
+  active_ms: number | null;
+  stop_reason: string | null;
+}
+
+/** Filter accepted by {@link turnViews}. */
+export interface TurnFilter {
+  segment_id?: string;
+  turn_id?: string;
+}
+
+/**
+ * An aggregated segment, as returned by the Query port.
+ *
+ * The {@link SegmentNode} fields (the opening boundary and the turns) are kept
+ * intact, so a client can either render the segment header from the flat
+ * metrics or drill into its turns.
+ */
+export interface SegmentView extends SegmentNode {
+  turn_count: number;
+  step_count: number;
+  tool_call_count: number;
+  tool_error_count: number;
+  llm_calls: number;
+  started_at: string | null;
+  ended_at: string | null;
+  status: SessionStatus;
+  usage: UsageTotal;
+  context_tokens_peak: number | null;
+  cache_hit_ratio: number | null;
+  tokens_in: number | null;
+  /** Number of turns per detected signal kind in this segment. */
+  signal_counts: Record<string, number>;
+}
+
 /** Aggregated view of a session, used by the session list and the header. */
 export interface SessionSummary {
   session_id: string;
@@ -530,6 +589,153 @@ export function buildSessionTree(events: AgentEvent[]): {
       return a.ts < b.ts ? -1 : 1;
     }),
   };
+}
+
+/** The first real user message of a turn, if its text was captured. */
+const turnPrompt = (turn: TurnNode): string | null => {
+  for (const event of turn.events) {
+    if (event.kind !== "message.user") continue;
+    const text = event.content?.input?.text;
+    if (typeof text === "string") return text;
+    if (typeof event.attrs.text === "string") return event.attrs.text;
+  }
+  return null;
+};
+
+const contextSummary = (
+  calls: AgentEvent[],
+): {
+  usage: UsageTotal;
+  context_tokens_peak: number | null;
+  cache_hit_ratio: number | null;
+  tokens_in: number | null;
+} => {
+  const contexts = calls
+    .map((event) => contextTokens(event.usage))
+    .filter((value): value is number => value !== null);
+  let tokensIn: number | null = null;
+  let cacheReadSum = 0;
+  let contextSum = 0;
+  let cacheCalls = 0;
+
+  for (const event of calls) {
+    const context = contextTokens(event.usage);
+    if (context === null) continue;
+    tokensIn = (tokensIn ?? 0) + context;
+    const cacheRead = event.usage?.cache_read_tokens;
+    if (typeof cacheRead === "number" && Number.isFinite(cacheRead)) {
+      cacheReadSum += cacheRead;
+      contextSum += context;
+      cacheCalls += 1;
+    }
+  }
+
+  return {
+    usage: sumUsage(calls.map((event) => event.usage)),
+    context_tokens_peak: contexts.length === 0 ? null : Math.max(...contexts),
+    cache_hit_ratio:
+      cacheCalls === 0 || contextSum === 0 ? null : cacheReadSum / contextSum,
+    tokens_in: tokensIn,
+  };
+};
+
+/** Build the Query view of one turn. */
+export const buildTurnView = (turn: TurnNode): TurnView => {
+  const calls = turn.events.filter((event) => event.kind === "llm.call");
+  const metrics = contextSummary(calls);
+  const outputTokens = calls.reduce<number | null>((total, event) => {
+    const value = event.usage?.output_tokens;
+    if (typeof value !== "number" || !Number.isFinite(value)) return total;
+    return (total ?? 0) + value;
+  }, null);
+
+  return {
+    ...turn,
+    signals: turn.summary.signals,
+    prompt: turnPrompt(turn),
+    tokens_in: metrics.tokens_in,
+    output_tokens: outputTokens,
+    step_count: turn.summary.step_count,
+    tool_call_count: turn.summary.tool_call_count,
+    tool_error_count: turn.summary.tool_error_count,
+    llm_calls: turn.summary.llm_calls,
+    usage: turn.summary.usage,
+    context_tokens_peak: turn.summary.context_tokens_peak,
+    wall_ms: turn.summary.wall_ms,
+    active_ms: turn.summary.active_ms,
+    stop_reason: turn.summary.stop_reason,
+  };
+};
+
+/**
+ * Build the turn rows of a session, optionally restricted to one segment or
+ * turn. Filtering happens after the tree is built, so a summary is always
+ * computed from the whole turn (and a context delta from the whole segment).
+ */
+export function turnViews(events: AgentEvent[], filter: TurnFilter = {}): TurnView[] {
+  return buildSessionTree(events)
+    .turns.filter(
+      (turn) =>
+        (filter.segment_id === undefined || turn.segment_id === filter.segment_id) &&
+        (filter.turn_id === undefined || turn.turn_id === filter.turn_id),
+    )
+    .map(buildTurnView);
+}
+
+const segmentView = (segment: SegmentNode, events: AgentEvent[]): SegmentView => {
+  const calls = events.filter((event) => event.kind === "llm.call");
+  const metrics = contextSummary(calls);
+  const signalCounts: Record<string, number> = {};
+  let startedAt: string | null = segment.boundary?.ts ?? null;
+  let endedAt: string | null = segment.boundary?.ts ?? null;
+  let stepCount = 0;
+  let toolCallCount = 0;
+  let toolErrorCount = 0;
+
+  for (const turn of segment.turns) {
+    stepCount += turn.summary.step_count;
+    toolCallCount += turn.summary.tool_call_count;
+    toolErrorCount += turn.summary.tool_error_count;
+    for (const signal of turn.summary.signals) {
+      signalCounts[signal.kind] = (signalCounts[signal.kind] ?? 0) + 1;
+    }
+    for (const event of turn.events) {
+      startedAt = startedAt === null ? event.ts : minTimestamp(startedAt, event.ts);
+      const end = event.end_ts ?? event.ts;
+      endedAt = endedAt === null ? end : maxTimestamp(endedAt, end);
+    }
+  }
+
+  const lastTurn = segment.turns[segment.turns.length - 1];
+  const status: SessionStatus = lastTurn?.status ?? "unknown";
+
+  return {
+    ...segment,
+    turn_count: segment.turns.length,
+    step_count: stepCount,
+    tool_call_count: toolCallCount,
+    tool_error_count: toolErrorCount,
+    llm_calls: calls.length,
+    started_at: startedAt,
+    ended_at: endedAt,
+    status,
+    usage: metrics.usage,
+    context_tokens_peak: metrics.context_tokens_peak,
+    cache_hit_ratio: metrics.cache_hit_ratio,
+    tokens_in: metrics.tokens_in,
+    signal_counts: signalCounts,
+  };
+};
+
+/** Build the segment rows of a session, with their boundary and metrics. */
+export function segmentViews(events: AgentEvent[]): SegmentView[] {
+  const ordered = sortEvents(dedupeEvents(events));
+  return buildSessionTree(events).segments.map((segment) =>
+    segmentView(
+      segment,
+      ordered.filter((event) => segmentOf(event) === segment.segment_id),
+    ),
+  );
 }
 
 const summarize = (

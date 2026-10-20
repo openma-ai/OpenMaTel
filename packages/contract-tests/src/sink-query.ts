@@ -27,7 +27,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSessionTree,
+  llmCallSeries,
   sessionId,
+  segmentViews,
+  turnViews,
   type AgentEvent,
   type EventKind,
   type Query,
@@ -38,7 +41,17 @@ import {
   type TurnNode,
 } from "@openmatel/core";
 
-import { SAMPLE_STEPS, SAMPLE_TITLE, SAMPLE_TS, makeEvent, sampleSessions } from "./fixtures.js";
+import {
+  SAMPLE_SEGMENT_1,
+  SAMPLE_SEGMENT_2,
+  SAMPLE_STEPS,
+  SAMPLE_TITLE,
+  SAMPLE_TURN_1,
+  SAMPLE_TURN_2,
+  SAMPLE_TS,
+  makeEvent,
+  sampleSessions,
+} from "./fixtures.js";
 
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */
@@ -364,6 +377,170 @@ export function sinkQueryContract(
         expect(both.items.every((step) => step.kind === "tool.call" || step.kind === "llm.call")).toBe(
           true,
         );
+
+        const secondSegment = await store.query.listSteps({
+          session_id: session.session_id,
+          segment_id: SAMPLE_SEGMENT_2,
+        });
+        expect(secondSegment.items.map((step) => step.step_id)).toEqual([SAMPLE_STEPS.llm_4]);
+        expect(secondSegment.items.every((step) => step.segment_id === SAMPLE_SEGMENT_2)).toBe(true);
+
+        const firstTurn = await store.query.listSteps({
+          session_id: session.session_id,
+          turn_id: SAMPLE_TURN_1,
+        });
+        expect(firstTurn.items.some((step) => step.step_id === SAMPLE_STEPS.llm_4)).toBe(false);
+        expect(firstTurn.items.every((step) => step.turn_id === SAMPLE_TURN_1)).toBe(true);
+      });
+    });
+
+    it("returns segments with boundaries, turns and metrics", async () => {
+      await withStore(factory, async (store) => {
+        const session = fixtureSessions().find((item) => item.key === "sample");
+        if (!session) throw new Error("missing fixture session");
+        await store.sink.write(session.events);
+
+        const segments = await store.query.getSegments(session.session_id);
+        expect(segments.map((segment) => segment.segment_id)).toEqual([
+          SAMPLE_SEGMENT_1,
+          SAMPLE_SEGMENT_2,
+        ]);
+        expect(segments[0]?.boundary).toBeUndefined();
+        expect(segments[0]?.turn_count).toBe(1);
+        expect(segments[0]?.turns.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_1]);
+        expect(segments[1]?.boundary?.event_id).toBe("ev_sample_segment_boundary");
+        expect(segments[1]?.turns.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_2]);
+        expect(segments[1]?.llm_calls).toBe(1);
+
+        const expected = segmentViews(session.events);
+        expect(segments).toEqual(expected);
+        expect(await store.query.getSegments("ss_does_not_exist")).toEqual([]);
+      });
+    });
+
+    it("returns turn summaries and signals, filterable by segment", async () => {
+      await withStore(factory, async (store) => {
+        const sessions = fixtureSessions();
+        const session = sessions.find((item) => item.key === "sample");
+        const signals = sessions.find((item) => item.key === "signals");
+        if (!session || !signals) throw new Error("missing fixture sessions");
+        await store.sink.write([...session.events, ...signals.events]);
+
+        const turns = await store.query.getTurns(session.session_id);
+        expect(turns.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_1, SAMPLE_TURN_2]);
+        expect(turns[0]?.prompt).toBe("please fix the login bug");
+        expect(turns[0]?.signals).toEqual(turns[0]?.summary.signals);
+        expect(turns[0]?.step_count).toBe(turns[0]?.summary.step_count);
+        expect(turns[0]?.tokens_in).toBeNull();
+        expect(turns).toEqual(turnViews(session.events));
+
+        const second = await store.query.getTurns(session.session_id, {
+          segment_id: SAMPLE_SEGMENT_2,
+        });
+        expect(second.map((turn) => turn.turn_id)).toEqual([SAMPLE_TURN_2]);
+
+        const signalTurns = await store.query.getTurns(signals.session_id);
+        expect(signalTurns.flatMap((turn) => turn.signals.map((signal) => signal.kind))).toEqual(
+          expect.arrayContaining(["user_interrupt", "user_correction"]),
+        );
+
+        expect(await store.query.getTurns("ss_does_not_exist")).toEqual([]);
+      });
+    });
+
+    it("returns the LLM call series with context deltas, watermarks and usage", async () => {
+      await withStore(factory, async (store) => {
+        const session = fixtureSessions().find((item) => item.key === "llm-series");
+        if (!session) throw new Error("missing fixture session");
+        await store.sink.write(session.events);
+
+        const calls = await store.query.getLlmCalls(session.session_id);
+        expect(calls.map((call) => call.step_id)).toEqual([
+          "st_series_1",
+          "st_series_2",
+          "st_series_3",
+          "st_series_4",
+        ]);
+
+        expect(calls[0]).toMatchObject({
+          segment_id: SAMPLE_SEGMENT_1,
+          context_tokens: 160,
+          context_delta: null,
+          watermark: 160,
+          cache_hit_ratio: 50 / 160,
+          stop_reason: "end_turn",
+          latency_ms: 1000,
+          ttft_ms: 200,
+          input: 100,
+          cache_read: 50,
+          cache_write: 10,
+          output: 20,
+        });
+        expect(calls[0]?.usage?.source).toBe("provider");
+        expect(calls[1]).toMatchObject({
+          context_tokens: 50,
+          context_delta: -110,
+          watermark: 50,
+          cache_hit_ratio: 30 / 50,
+          stop_reason: "max_tokens",
+          latency_ms: null,
+          ttft_ms: null,
+        });
+        expect(calls[2]).toMatchObject({
+          segment_id: SAMPLE_SEGMENT_2,
+          context_tokens: 15,
+          context_delta: null,
+          watermark: 15,
+          cache_hit_ratio: 5 / 15,
+        });
+        expect(calls[3]).toMatchObject({
+          context_tokens: null,
+          context_delta: null,
+          watermark: null,
+          cache_hit_ratio: null,
+          stop_reason: null,
+          latency_ms: null,
+          ttft_ms: null,
+          usage: null,
+        });
+
+        expect(calls).toEqual(llmCallSeries(session.events));
+
+        const firstTurn = await store.query.getLlmCalls(session.session_id, {
+          turn_id: "turn_series_1",
+        });
+        expect(firstTurn.map((call) => call.step_id)).toEqual(["st_series_1", "st_series_2"]);
+
+        const secondSegment = await store.query.getLlmCalls(session.session_id, {
+          segment_id: SAMPLE_SEGMENT_2,
+        });
+        expect(secondSegment.map((call) => call.step_id)).toEqual(["st_series_3", "st_series_4"]);
+        expect(secondSegment[0]?.context_delta).toBeNull();
+
+        expect(await store.query.getLlmCalls("ss_does_not_exist")).toEqual([]);
+      });
+    });
+
+    it("filters the session list by detected signal", async () => {
+      await withStore(factory, async (store) => {
+        const sessions = fixtureSessions();
+        await store.sink.write(sessions.flatMap((session) => session.events));
+
+        const signals = sessions.find((session) => session.key === "signals");
+        if (!signals) throw new Error("missing fixture session");
+
+        const interrupted = await store.query.listSessions({ has_signal: "user_interrupt" });
+        expect(interrupted.items.map((summary) => summary.session_id)).toEqual([
+          signals.session_id,
+        ]);
+        expect(interrupted.items[0]?.signal_counts.user_interrupt).toBe(1);
+
+        const corrected = await store.query.listSessions({ has_signal: "user_correction" });
+        expect(corrected.items.map((summary) => summary.session_id)).toEqual([
+          signals.session_id,
+        ]);
+
+        expect((await store.query.listSessions({ has_signal: "loop" })).items).toEqual([]);
       });
     });
 
@@ -624,6 +801,155 @@ const pageSessions = (): FixtureSession[] => [
   }),
 ];
 
+/** A session with interrupts and a correction, for the `has_signal` filter. */
+const signalSession = (): FixtureSession =>
+  simpleSession({
+    key: "signals",
+    project_id: PROJECT_ID,
+    source: "sdk-http",
+    title: "Interrupted session",
+    started_at: "2026-04-01T09:00:00.000Z",
+    extra: [
+      {
+        kind: "control.interrupt",
+        event_id: "ev_signals_interrupt",
+        turn_id: "turn_signals_1",
+        step_id: "st_signals_interrupt",
+        ts: "2026-04-01T09:00:01.000Z",
+        attrs: { reason: "user" },
+      },
+      {
+        kind: "message.user",
+        event_id: "ev_signals_correction",
+        turn_id: "turn_signals_2",
+        ts: "2026-04-01T09:00:02.000Z",
+        attrs: { role: "user" },
+        content: { capture: "full", input: { text: "actually, use the other file" } },
+      },
+    ],
+  });
+
+/** A session whose calls exercise context deltas and unknown values. */
+const llmSeriesSession = (): FixtureSession =>
+  simpleSession({
+    key: "llm-series",
+    project_id: PROJECT_ID,
+    source: "llm-series",
+    title: "Context series session",
+    started_at: "2026-05-01T09:00:00.000Z",
+    extra: [
+      {
+        kind: "llm.call",
+        event_id: "ev_series_llm_1",
+        turn_id: "turn_series_1",
+        step_id: "st_series_1",
+        ts: "2026-05-01T09:00:01.000Z",
+        end_ts: "2026-05-01T09:00:02.000Z",
+        status: "ok",
+        attrs: {
+          provider: "anthropic",
+          model: "model-x",
+          context_tokens: null,
+          stop_reason: "end_turn",
+          latency_ms: 1000,
+          ttft_ms: 200,
+        },
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_read_tokens: 50,
+          cache_write_tokens: 10,
+          reasoning_tokens: null,
+          source: "provider",
+        },
+      },
+      {
+        kind: "llm.call",
+        event_id: "ev_series_llm_2",
+        turn_id: "turn_series_1",
+        step_id: "st_series_2",
+        ts: "2026-05-01T09:00:02.000Z",
+        end_ts: "2026-05-01T09:00:03.000Z",
+        status: "ok",
+        attrs: {
+          provider: "anthropic",
+          model: "model-x",
+          context_tokens: null,
+          stop_reason: "max_tokens",
+          latency_ms: null,
+          ttft_ms: null,
+        },
+        usage: {
+          input_tokens: 20,
+          output_tokens: 10,
+          cache_read_tokens: 30,
+          cache_write_tokens: 0,
+          reasoning_tokens: null,
+          source: "provider",
+        },
+      },
+      {
+        kind: "segment.boundary",
+        event_id: "ev_series_boundary",
+        segment_id: SAMPLE_SEGMENT_2,
+        ts: "2026-05-01T09:00:02.500Z",
+        attrs: {
+          reason: "compaction",
+          context_tokens_before: 50,
+          context_tokens_after: 15,
+          tokens_removed: 35,
+          summary: "compacted",
+          parent_segment_id: SAMPLE_SEGMENT_1,
+        },
+      },
+      {
+        kind: "llm.call",
+        event_id: "ev_series_llm_3",
+        turn_id: "turn_series_2",
+        segment_id: SAMPLE_SEGMENT_2,
+        step_id: "st_series_3",
+        ts: "2026-05-01T09:00:03.000Z",
+        end_ts: "2026-05-01T09:00:04.000Z",
+        status: "ok",
+        attrs: {
+          provider: "anthropic",
+          model: "model-x",
+          context_tokens: null,
+          stop_reason: "end_turn",
+          latency_ms: 500,
+          ttft_ms: 100,
+        },
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_tokens: 5,
+          cache_write_tokens: 0,
+          reasoning_tokens: null,
+          source: "provider",
+        },
+      },
+      {
+        kind: "llm.call",
+        event_id: "ev_series_llm_4",
+        turn_id: "turn_series_2",
+        segment_id: SAMPLE_SEGMENT_2,
+        step_id: "st_series_4",
+        ts: "2026-05-01T09:00:04.000Z",
+        end_ts: "2026-05-01T09:00:05.000Z",
+        status: "ok",
+        attrs: {
+          provider: null,
+          model: null,
+          context_tokens: null,
+          stop_reason: null,
+          latency_ms: null,
+          ttft_ms: null,
+        },
+        usage: null,
+      },
+    ],
+  });
+
 /** A session of the second project. */
 const otherProjectSession = (): FixtureSession =>
   simpleSession({
@@ -652,6 +978,8 @@ const fixtureSessions = (): FixtureSession[] => {
     usageMissingSession(),
     noContentSession(),
     ...pageSessions(),
+    signalSession(),
+    llmSeriesSession(),
     otherProjectSession(),
   ];
 };

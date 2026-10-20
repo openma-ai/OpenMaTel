@@ -55,6 +55,12 @@ export interface LlmCallPoint {
   context_tokens: number | null;
   /** Change against the previous call in the same segment, or `null`. */
   context_delta: number | null;
+  /**
+   * The context watermark after this call: the full prompt size the call saw.
+   * It is the same value as {@link context_tokens}, exposed under the name the
+   * context-watermark chart uses.
+   */
+  watermark: number | null;
   /** `cache_read_tokens / context_tokens`, or `null` when unknown. */
   cache_hit_ratio: number | null;
   input: number | null;
@@ -65,6 +71,14 @@ export interface LlmCallPoint {
   stop_reason: string | null;
   latency_ms: number | null;
   ttft_ms: number | null;
+  /** The raw usage record of the call, or `null` when the source gave none. */
+  usage: Usage | null;
+}
+
+/** Filter for {@link llmCallSeries}. */
+export interface LlmCallFilter {
+  segment_id?: string;
+  turn_id?: string;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -111,8 +125,12 @@ function sortEvents(events: AgentEvent[]): AgentEvent[] {
  * previous call **in the same segment**, so the first call of a segment (and
  * the first call after a compaction boundary) has `null` instead of a
  * meaningless jump.
+ *
+ * When a filter is given, the full series is built first and then filtered.
+ * That keeps `context_delta` relative to the real previous call in the
+ * segment, not to the first row of the filtered result.
  */
-export function llmCallSeries(events: AgentEvent[]): LlmCallPoint[] {
+export function llmCallSeries(events: AgentEvent[], filter: LlmCallFilter = {}): LlmCallPoint[] {
   const ordered = sortEvents(dedupe(events)).filter((event) => event.kind === "llm.call");
   const previousBySegment = new Map<string, number | null>();
   const points: LlmCallPoint[] = [];
@@ -143,6 +161,7 @@ export function llmCallSeries(events: AgentEvent[]): LlmCallPoint[] {
       model: asString(attrs.model),
       context_tokens,
       context_delta,
+      watermark: context_tokens,
       cache_hit_ratio,
       input: usage ? asNumber(usage.input_tokens) : null,
       cache_read: cacheRead,
@@ -152,10 +171,16 @@ export function llmCallSeries(events: AgentEvent[]): LlmCallPoint[] {
       stop_reason: asString(attrs.stop_reason),
       latency_ms: asNumber(attrs.latency_ms),
       ttft_ms: asNumber(attrs.ttft_ms),
+      usage,
     });
 
     previousBySegment.set(segment_id, context_tokens);
   }
 
-  return points;
+  if (filter.segment_id === undefined && filter.turn_id === undefined) return points;
+  return points.filter(
+    (point) =>
+      (filter.segment_id === undefined || point.segment_id === filter.segment_id) &&
+      (filter.turn_id === undefined || point.turn_id === filter.turn_id),
+  );
 }

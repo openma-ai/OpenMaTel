@@ -13,9 +13,11 @@
 export {
   ObsApiError,
   createObsClient,
+  type LlmCallParams,
   type ObsClient,
   type ObsClientOptions,
   type ObsSessionDetail,
+  type SegmentFilterParams,
   type SessionListParams,
 } from "./client.js";
 export {

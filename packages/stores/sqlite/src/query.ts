@@ -18,13 +18,17 @@
 
 import {
   buildSessionTree,
+  llmCallSeries,
+  segmentViews,
   summarizeSession,
+  turnViews,
   type AgentEvent,
   type AggGroup,
   type AggQuery,
   type AggResult,
   type Content,
   type ContentRef,
+  type LlmCallFilter,
   type Page,
   type Query,
   type SessionDetail,
@@ -33,6 +37,7 @@ import {
   type Step,
   type StepNode,
   type StepQuery,
+  type TurnFilter,
 } from "@openmatel/core";
 
 import { decodeCursor, encodeCursor, type SessionCursor, type StepCursor } from "./cursor.js";
@@ -104,6 +109,12 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
       where.push("tool_error_count > 0");
     } else if (q.has_error === false) {
       where.push("tool_error_count = 0");
+    }
+    if (q.has_signal !== undefined) {
+      // `signal_counts` is part of the materialized summary. The path is
+      // passed as a parameter, never concatenated into the SQL string.
+      where.push("COALESCE(json_extract(summary_json, ?), 0) > 0");
+      params.push(`$.signal_counts.${q.has_signal}`);
     }
     if (q.from !== undefined) {
       where.push("started_at >= ?");
@@ -204,6 +215,25 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
   };
 
   /* ---------------------------------------------------------------------- */
+  /* Segments, turns and LLM calls                                           */
+  /* ---------------------------------------------------------------------- */
+
+  const getSegments = async (session_id: string) => {
+    if (typeof session_id !== "string" || session_id === "") return [];
+    return segmentViews(loadSessionEvents(db, session_id));
+  };
+
+  const getTurns = async (session_id: string, filter?: TurnFilter) => {
+    if (typeof session_id !== "string" || session_id === "") return [];
+    return turnViews(loadSessionEvents(db, session_id), filter);
+  };
+
+  const getLlmCalls = async (session_id: string, filter?: LlmCallFilter) => {
+    if (typeof session_id !== "string" || session_id === "") return [];
+    return llmCallSeries(loadSessionEvents(db, session_id), filter);
+  };
+
+  /* ---------------------------------------------------------------------- */
   /* Steps                                                                   */
   /* ---------------------------------------------------------------------- */
 
@@ -219,6 +249,11 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
     if (q.project_id !== undefined) {
       where.push("project_id = ?");
       params.push(q.project_id);
+    }
+    if (q.segment_id !== undefined) {
+      // The segment index from migration 2 answers this filter directly.
+      where.push("segment_id = ?");
+      params.push(q.segment_id);
     }
 
     const rows = db.all<{ event_json: string }>(
@@ -242,23 +277,29 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
 
       // The turn and the parent of a step are remembered from the events, so
       // a step that never got a turn still reports the one it belongs to.
-      const meta = new Map<string, { turn_id?: string; parent_step_id?: string }>();
+      const meta = new Map<
+        string,
+        { turn_id?: string; parent_step_id?: string; segment_id?: string }
+      >();
       for (const event of events) {
         if (!event.step_id) continue;
         const previous = meta.get(event.step_id);
         meta.set(event.step_id, {
           turn_id: event.turn_id ?? previous?.turn_id,
           parent_step_id: event.parent_step_id ?? previous?.parent_step_id,
+          segment_id: event.segment_id ?? previous?.segment_id,
         });
       }
 
       for (const turn of turns) {
         if (q.turn_id !== undefined && q.turn_id !== turn.turn_id) continue;
+        if (q.segment_id !== undefined && q.segment_id !== turn.segment_id) continue;
         for (const node of flattenSteps(turn.steps)) {
           const info = meta.get(node.step_id);
           steps.push({
             step_id: node.step_id,
             session_id,
+            segment_id: info?.segment_id ?? turn.segment_id,
             turn_id: info?.turn_id ?? turn.turn_id,
             parent_step_id: info?.parent_step_id,
             kind: node.kind,
@@ -282,6 +323,10 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
     if (q.status !== undefined) {
       const status = q.status;
       steps = steps.filter((step) => step.status === status);
+    }
+    if (q.segment_id !== undefined) {
+      const segment_id = q.segment_id;
+      steps = steps.filter((step) => step.segment_id === segment_id);
     }
     if (q.tool_name !== undefined) {
       const tool_name = q.tool_name;
@@ -467,5 +512,14 @@ export const createQuery = ({ db, fts }: QueryContext): Query => {
     return { groups, total };
   };
 
-  return { listSessions, getSession, listSteps, getContent, aggregate };
+  return {
+    listSessions,
+    getSession,
+    listSteps,
+    getSegments,
+    getTurns,
+    getLlmCalls,
+    getContent,
+    aggregate,
+  };
 };

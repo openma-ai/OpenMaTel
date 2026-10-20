@@ -23,7 +23,16 @@ import type {
   StepStatus,
   Usage,
 } from "./schema.js";
-import type { SessionSummary, SegmentNode, TurnNode } from "./tree.js";
+import type { SignalKind } from "./signals.js";
+import type {
+  SegmentNode,
+  SegmentView,
+  SessionSummary,
+  TurnFilter,
+  TurnNode,
+  TurnView,
+} from "./tree.js";
+import type { LlmCallFilter, LlmCallPoint } from "./llm.js";
 import type { UsageTotal } from "./usage.js";
 
 /* -------------------------------------------------------------------------- */
@@ -141,6 +150,8 @@ export interface SessionQuery {
   harness?: string;
   /** Only sessions that contain a failed step. */
   has_error?: boolean;
+  /** Only sessions with at least one detected signal of this kind. */
+  has_signal?: SignalKind;
   /** Free-text search over title, cwd and event content. */
   text?: string;
   /** ISO timestamp, inclusive lower bound. */
@@ -158,6 +169,8 @@ export interface StepQuery {
   project_id?: string;
   session_id?: string;
   turn_id?: string;
+  /** Only steps of this context segment (design §15.1). */
+  segment_id?: string;
   /** One or more kinds to include. */
   kind?: EventKind | EventKind[];
   /** Only steps with this status. */
@@ -183,6 +196,8 @@ export interface Page<T> {
 export interface Step {
   step_id: string;
   session_id: string;
+  /** Context segment the step belongs to (design §15.1). */
+  segment_id: string;
   turn_id?: string;
   parent_step_id?: string;
   kind: EventKind;
@@ -256,6 +271,31 @@ export interface Query {
   getSession(session_id: string): Promise<SessionDetail | null>;
   /** List the steps matching a query. */
   listSteps(q: StepQuery): Promise<Page<Step>>;
+  /**
+   * The context segments of one session, in order (design §15.1).
+   *
+   * Every segment carries its opening boundary (none for `seg_0`), its turns
+   * and aggregated metrics. An unknown session returns an empty list.
+   */
+  getSegments(session_id: string): Promise<SegmentView[]>;
+  /**
+   * The turns of one session as summary rows, in order (design §15.2).
+   *
+   * Each row also carries its detected signals. `segment_id` restricts the
+   * result to one context segment. An unknown session returns an empty list.
+   */
+  getTurns(session_id: string, filter?: TurnFilter): Promise<TurnView[]>;
+  /**
+   * The `llm.call` series of one session (design §15.5–§15.7).
+   *
+   * The full series is computed first and then filtered, so `context_delta`
+   * stays relative to the previous call in the same segment. An unknown
+   * session returns an empty list.
+   */
+  getLlmCalls(
+    session_id: string,
+    filter?: LlmCallFilter,
+  ): Promise<LlmCallPoint[]>;
   /** Aggregations such as error hotspots, usage and latency. */
   aggregate?(q: AggQuery): Promise<AggResult>;
   /** Load the content of a step on demand, from the same store. */

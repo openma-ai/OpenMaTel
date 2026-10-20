@@ -12,15 +12,22 @@ import { Hono, type Context } from "hono";
 
 import {
   EVENT_KINDS,
+  SIGNAL_KINDS,
   STEP_STATUSES,
   buildSessionTree,
+  llmCallSeries,
+  segmentViews,
+  turnViews,
   type AggQuery,
   type EventKind,
+  type LlmCallFilter,
   type Query,
   type SessionDetail,
   type SessionQuery,
+  type SignalKind,
   type StepQuery,
   type StepStatus,
+  type TurnFilter,
 } from "@openmatel/core";
 
 /** Resolve a request path to a static asset, or `null` when it does not exist. */
@@ -202,6 +209,15 @@ const stepStatusParam = (params: URLSearchParams): StepStatus | undefined => {
   return value as StepStatus;
 };
 
+const signalKindParam = (params: URLSearchParams): SignalKind | undefined => {
+  const value = stringParam(params, "has_signal");
+  if (value === undefined) return undefined;
+  if (!(SIGNAL_KINDS as readonly string[]).includes(value)) {
+    throw invalid(`has_signal must be one of ${SIGNAL_KINDS.join(", ")}`);
+  }
+  return value as SignalKind;
+};
+
 /* -------------------------------------------------------------------------- */
 /* Session lookup                                                              */
 /* -------------------------------------------------------------------------- */
@@ -309,6 +325,7 @@ export function createApp(options: ServerOptions): Hono {
       source: stringParam(params, "source"),
       harness: stringParam(params, "harness"),
       has_error: booleanParam(params, "has_error"),
+      has_signal: signalKindParam(params),
       text: stringParam(params, "q"),
       from: dateParam(params, "from"),
       to: dateParam(params, "to"),
@@ -322,12 +339,60 @@ export function createApp(options: ServerOptions): Hono {
     const params = new URL(c.req.url).searchParams;
     const q: StepQuery = {
       session_id: c.req.param("id"),
+      turn_id: stringParam(params, "turn_id"),
+      segment_id: stringParam(params, "segment_id"),
       kind: eventKindParam(params),
       status: stepStatusParam(params),
       cursor: stringParam(params, "cursor"),
       limit: limitParam(params),
     };
     return c.json(await query.listSteps(q));
+  });
+
+  const requireSession = async (id: string): Promise<SessionDetail> => {
+    const detail = await getSession(query, id);
+    if (!detail) throw notFound(`Session "${id}" was not found`);
+    return detail;
+  };
+
+  app.get("/v1/query/sessions/:id/segments", async (c) => {
+    const id = c.req.param("id");
+    const detail = await requireSession(id);
+    const items =
+      typeof query.getSegments === "function"
+        ? await query.getSegments(id)
+        : segmentViews(detail.events);
+    return c.json({ items, next_cursor: null });
+  });
+
+  app.get("/v1/query/sessions/:id/turns", async (c) => {
+    const params = new URL(c.req.url).searchParams;
+    const id = c.req.param("id");
+    const detail = await requireSession(id);
+    const filter: TurnFilter = {
+      segment_id: stringParam(params, "segment_id"),
+      turn_id: stringParam(params, "turn_id"),
+    };
+    const items =
+      typeof query.getTurns === "function"
+        ? await query.getTurns(id, filter)
+        : turnViews(detail.events, filter);
+    return c.json({ items, next_cursor: null });
+  });
+
+  app.get("/v1/query/sessions/:id/llm-calls", async (c) => {
+    const params = new URL(c.req.url).searchParams;
+    const id = c.req.param("id");
+    const detail = await requireSession(id);
+    const filter: LlmCallFilter = {
+      segment_id: stringParam(params, "segment_id"),
+      turn_id: stringParam(params, "turn_id"),
+    };
+    const items =
+      typeof query.getLlmCalls === "function"
+        ? await query.getLlmCalls(id, filter)
+        : llmCallSeries(detail.events, filter);
+    return c.json({ items, next_cursor: null });
   });
 
   app.get("/v1/query/sessions/:id", async (c) => {

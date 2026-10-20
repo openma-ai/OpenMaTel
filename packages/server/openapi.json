@@ -3,7 +3,7 @@
   "info": {
     "title": "OpenMaTel Query API",
     "version": "1.0.0",
-    "description": "Read-only HTTP Query API for OpenMaTel agent-observability sessions, turns and steps. The server is platform-agnostic and receives a Query port from the composition root.",
+    "description": "Read-only HTTP Query API for OpenMaTel agent-observability sessions, segments, turns, steps and LLM calls. The server is platform-agnostic and receives a Query port from the composition root.",
     "license": {
       "name": "MIT"
     }
@@ -37,7 +37,9 @@
   "paths": {
     "/v1/health": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "operationId": "getHealth",
         "summary": "Liveness and server version",
         "description": "The only public route; it never requires the desktop token.",
@@ -50,7 +52,10 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["ok", "version"],
+                  "required": [
+                    "ok",
+                    "version"
+                  ],
                   "properties": {
                     "ok": {
                       "type": "boolean",
@@ -75,7 +80,9 @@
     },
     "/v1/query/sessions": {
       "get": {
-        "tags": ["Query"],
+        "tags": [
+          "Query"
+        ],
         "operationId": "listSessions",
         "summary": "List session summaries",
         "description": "Returns sessions ordered by started_at descending, then session_id ascending. Pagination is keyset-based and opaque.",
@@ -91,6 +98,9 @@
           },
           {
             "$ref": "#/components/parameters/HasError"
+          },
+          {
+            "$ref": "#/components/parameters/HasSignal"
           },
           {
             "$ref": "#/components/parameters/Text"
@@ -136,7 +146,9 @@
     },
     "/v1/query/sessions/{id}": {
       "get": {
-        "tags": ["Query"],
+        "tags": [
+          "Query"
+        ],
         "operationId": "getSession",
         "summary": "Get one session with its turn/step tree",
         "description": "Returns the stored summary and the core buildSessionTree output. Lookup is exact unless the Query implementation opts into prefix lookup with getSessionByPrefix().",
@@ -180,7 +192,9 @@
     },
     "/v1/query/sessions/{id}/steps": {
       "get": {
-        "tags": ["Query"],
+        "tags": [
+          "Query"
+        ],
         "operationId": "listSessionSteps",
         "summary": "List the flat steps of a session",
         "description": "Returns the steps of one session in timestamp order. An unknown session id yields an empty page.",
@@ -194,6 +208,12 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          {
+            "$ref": "#/components/parameters/SegmentId"
+          },
+          {
+            "$ref": "#/components/parameters/TurnId"
           },
           {
             "$ref": "#/components/parameters/Kind"
@@ -236,7 +256,9 @@
     },
     "/v1/query/aggregate/tool-errors": {
       "get": {
-        "tags": ["Query"],
+        "tags": [
+          "Query"
+        ],
         "operationId": "aggregateToolErrors",
         "summary": "Aggregate tool errors",
         "description": "Delegates to Query.aggregate(). Returns 501 when the injected Query implementation does not implement aggregate().",
@@ -248,7 +270,11 @@
             "description": "Grouping dimension.",
             "schema": {
               "type": "string",
-              "enum": ["tool_name", "harness", "model"],
+              "enum": [
+                "tool_name",
+                "harness",
+                "model"
+              ],
               "default": "tool_name"
             }
           },
@@ -294,6 +320,162 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/query/sessions/{id}/segments": {
+      "get": {
+        "tags": [
+          "Query"
+        ],
+        "operationId": "listSessionSegments",
+        "summary": "List the context segments of a session",
+        "description": "Returns the session's context segments in order. Each segment carries its opening segment.boundary event (none for seg_0), its turns and aggregated metrics. An unknown session is 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of context segments.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageSegmentView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/query/sessions/{id}/turns": {
+      "get": {
+        "tags": [
+          "Query"
+        ],
+        "operationId": "listSessionTurns",
+        "summary": "List the turn summaries of a session",
+        "description": "Returns turn rows with their summary, signals, prompt preview and token totals. segment_id restricts the result to one context segment. An unknown session is 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "$ref": "#/components/parameters/SegmentId"
+          },
+          {
+            "$ref": "#/components/parameters/TurnId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of turn summaries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageTurnView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/query/sessions/{id}/llm-calls": {
+      "get": {
+        "tags": [
+          "Query"
+        ],
+        "operationId": "listSessionLlmCalls",
+        "summary": "List the LLM call series of a session",
+        "description": "Returns one row per llm.call, ordered by timestamp. context_delta is relative to the previous call in the same segment, so the first call of a segment has null. segment_id and turn_id filter the already-computed series. An unknown session is 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Session id.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "$ref": "#/components/parameters/SegmentId"
+          },
+          {
+            "$ref": "#/components/parameters/TurnId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of LLM call metrics.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageLlmCallPoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenHost"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
           }
         }
       }
@@ -423,6 +605,33 @@
           "maximum": 200,
           "default": 50
         }
+      },
+      "SegmentId": {
+        "name": "segment_id",
+        "in": "query",
+        "required": false,
+        "description": "Only items of this context segment, e.g. seg_1.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "TurnId": {
+        "name": "turn_id",
+        "in": "query",
+        "required": false,
+        "description": "Only items of this turn.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "HasSignal": {
+        "name": "has_signal",
+        "in": "query",
+        "required": false,
+        "description": "Only sessions with at least one detected signal of this kind.",
+        "schema": {
+          "$ref": "#/components/schemas/SignalKind"
+        }
       }
     },
     "responses": {
@@ -489,12 +698,17 @@
       "Error": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["code", "message"],
+            "required": [
+              "code",
+              "message"
+            ],
             "properties": {
               "code": {
                 "type": "string"
@@ -531,6 +745,7 @@
           "control.retry",
           "control.compaction",
           "control.resume",
+          "segment.boundary",
           "memory.read",
           "memory.write",
           "skill.use",
@@ -540,11 +755,26 @@
       },
       "StepStatus": {
         "type": "string",
-        "enum": ["ok", "error", "cancelled", "interrupted", "denied", "timeout"]
+        "enum": [
+          "ok",
+          "error",
+          "cancelled",
+          "interrupted",
+          "denied",
+          "timeout"
+        ]
       },
       "SessionStatus": {
         "type": "string",
-        "enum": ["ok", "error", "cancelled", "interrupted", "denied", "timeout", "unknown"]
+        "enum": [
+          "ok",
+          "error",
+          "cancelled",
+          "interrupted",
+          "denied",
+          "timeout",
+          "unknown"
+        ]
       },
       "Usage": {
         "type": "object",
@@ -558,36 +788,72 @@
         ],
         "properties": {
           "input_tokens": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "output_tokens": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "cache_read_tokens": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "cache_write_tokens": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "reasoning_tokens": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "source": {
             "type": "string",
-            "enum": ["provider", "harness", "estimated", "missing"]
+            "enum": [
+              "provider",
+              "harness",
+              "estimated",
+              "missing"
+            ]
           },
           "cost_usd": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "cost_source": {
-            "type": ["string", "null"],
-            "enum": ["price_table", "provider", "harness", null]
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "price_table",
+              "provider",
+              "harness",
+              null
+            ]
           }
         }
       },
       "UsageTotal": {
         "type": "object",
-        "required": ["total", "calls", "covered", "coverage"],
+        "required": [
+          "total",
+          "calls",
+          "covered",
+          "coverage"
+        ],
         "properties": {
           "total": {
             "type": "object",
@@ -601,22 +867,40 @@
             ],
             "properties": {
               "input_tokens": {
-                "type": ["number", "null"]
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "output_tokens": {
-                "type": ["number", "null"]
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "cache_read_tokens": {
-                "type": ["number", "null"]
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "cache_write_tokens": {
-                "type": ["number", "null"]
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "reasoning_tokens": {
-                "type": ["number", "null"]
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "cost_usd": {
-                "type": ["number", "null"]
+                "type": [
+                  "number",
+                  "null"
+                ]
               }
             }
           },
@@ -629,7 +913,10 @@
             "minimum": 0
           },
           "coverage": {
-            "type": ["number", "null"],
+            "type": [
+              "number",
+              "null"
+            ],
             "minimum": 0,
             "maximum": 1
           }
@@ -637,7 +924,10 @@
       },
       "EventError": {
         "type": "object",
-        "required": ["type", "message"],
+        "required": [
+          "type",
+          "message"
+        ],
         "properties": {
           "type": {
             "type": "string"
@@ -652,7 +942,10 @@
       },
       "EventSource": {
         "type": "object",
-        "required": ["name", "format"],
+        "required": [
+          "name",
+          "format"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -686,7 +979,12 @@
           "tool_error_count",
           "subagent_count",
           "usage",
-          "status"
+          "status",
+          "segment_count",
+          "signal_counts",
+          "context_tokens_peak",
+          "cache_hit_ratio",
+          "tokens_in"
         ],
         "properties": {
           "session_id": {
@@ -696,26 +994,47 @@
             "type": "string"
           },
           "source": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "harness": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "model": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "cwd": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "started_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "ended_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "turn_count": {
@@ -743,12 +1062,49 @@
           },
           "status": {
             "$ref": "#/components/schemas/SessionStatus"
+          },
+          "segment_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "signal_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "context_tokens_peak": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_hit_ratio": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "tokens_in": {
+            "type": [
+              "number",
+              "null"
+            ]
           }
         }
       },
       "Step": {
         "type": "object",
-        "required": ["step_id", "session_id", "kind", "ts", "attrs", "source"],
+        "required": [
+          "step_id",
+          "session_id",
+          "segment_id",
+          "kind",
+          "ts",
+          "attrs",
+          "source"
+        ],
         "properties": {
           "step_id": {
             "type": "string"
@@ -756,11 +1112,20 @@
           "session_id": {
             "type": "string"
           },
+          "segment_id": {
+            "type": "string"
+          },
           "turn_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "parent_step_id": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "kind": {
             "$ref": "#/components/schemas/EventKind"
@@ -773,11 +1138,17 @@
             "format": "date-time"
           },
           "end_ts": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "attrs": {
             "type": "object",
@@ -803,7 +1174,14 @@
       },
       "StepNode": {
         "type": "object",
-        "required": ["step_id", "kind", "ts", "attrs", "source", "children"],
+        "required": [
+          "step_id",
+          "kind",
+          "ts",
+          "attrs",
+          "source",
+          "children"
+        ],
         "properties": {
           "step_id": {
             "type": "string"
@@ -819,11 +1197,17 @@
             "format": "date-time"
           },
           "end_ts": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "title": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "attrs": {
             "type": "object",
@@ -859,17 +1243,31 @@
       },
       "TurnNode": {
         "type": "object",
-        "required": ["turn_id", "ts", "end_ts", "events", "steps"],
+        "required": [
+          "turn_id",
+          "segment_id",
+          "ts",
+          "end_ts",
+          "events",
+          "steps",
+          "summary"
+        ],
         "properties": {
           "turn_id": {
             "type": "string"
           },
           "ts": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "end_ts": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "status": {
@@ -887,12 +1285,21 @@
             "items": {
               "$ref": "#/components/schemas/StepNode"
             }
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/TurnSummary"
           }
         }
       },
       "SessionDetail": {
         "type": "object",
-        "required": ["summary", "turns"],
+        "required": [
+          "summary",
+          "turns"
+        ],
         "properties": {
           "summary": {
             "$ref": "#/components/schemas/SessionSummary"
@@ -907,7 +1314,10 @@
       },
       "PageSessionSummary": {
         "type": "object",
-        "required": ["items", "next_cursor"],
+        "required": [
+          "items",
+          "next_cursor"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -916,13 +1326,19 @@
             }
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
       "PageStep": {
         "type": "object",
-        "required": ["items", "next_cursor"],
+        "required": [
+          "items",
+          "next_cursor"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -931,13 +1347,19 @@
             }
           },
           "next_cursor": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
       "AggGroup": {
         "type": "object",
-        "required": ["key", "count"],
+        "required": [
+          "key",
+          "count"
+        ],
         "properties": {
           "key": {
             "type": "string"
@@ -950,16 +1372,25 @@
             "$ref": "#/components/schemas/UsageTotal"
           },
           "cost_usd": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "latency_ms": {
-            "type": ["number", "null"]
+            "type": [
+              "number",
+              "null"
+            ]
           }
         }
       },
       "AggResult": {
         "type": "object",
-        "required": ["groups", "total"],
+        "required": [
+          "groups",
+          "total"
+        ],
         "properties": {
           "groups": {
             "type": "array",
@@ -970,6 +1401,543 @@
           "total": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "SignalKind": {
+        "type": "string",
+        "enum": [
+          "repeated_tool_failure",
+          "loop",
+          "user_interrupt",
+          "user_correction"
+        ]
+      },
+      "Signal": {
+        "type": "object",
+        "required": [
+          "kind",
+          "turn_id",
+          "step_ids"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/SignalKind"
+          },
+          "turn_id": {
+            "type": "string"
+          },
+          "step_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      },
+      "TurnSummary": {
+        "type": "object",
+        "required": [
+          "step_count",
+          "tool_call_count",
+          "tool_error_count",
+          "llm_calls",
+          "usage",
+          "context_tokens_peak",
+          "wall_ms",
+          "active_ms",
+          "stop_reason",
+          "signals"
+        ],
+        "properties": {
+          "step_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_call_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_error_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "llm_calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          "context_tokens_peak": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "wall_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "active_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Signal"
+            }
+          }
+        }
+      },
+      "TurnView": {
+        "type": "object",
+        "required": [
+          "turn_id",
+          "segment_id",
+          "ts",
+          "end_ts",
+          "events",
+          "steps",
+          "summary",
+          "signals",
+          "prompt",
+          "tokens_in",
+          "output_tokens",
+          "step_count",
+          "tool_call_count",
+          "tool_error_count",
+          "llm_calls",
+          "usage",
+          "context_tokens_peak",
+          "wall_ms",
+          "active_ms",
+          "stop_reason"
+        ],
+        "properties": {
+          "turn_id": {
+            "type": "string"
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "ts": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "end_ts": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StepNode"
+            }
+          },
+          "summary": {
+            "$ref": "#/components/schemas/TurnSummary"
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Signal"
+            }
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tokens_in": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output_tokens": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "step_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_call_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_error_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "llm_calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          "context_tokens_peak": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "wall_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "active_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SegmentView": {
+        "type": "object",
+        "required": [
+          "segment_id",
+          "turns",
+          "turn_count",
+          "step_count",
+          "tool_call_count",
+          "tool_error_count",
+          "llm_calls",
+          "started_at",
+          "ended_at",
+          "status",
+          "usage",
+          "context_tokens_peak",
+          "cache_hit_ratio",
+          "tokens_in",
+          "signal_counts"
+        ],
+        "properties": {
+          "segment_id": {
+            "type": "string"
+          },
+          "boundary": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnView"
+            }
+          },
+          "turn_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "step_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_call_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tool_error_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "llm_calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageTotal"
+          },
+          "context_tokens_peak": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_hit_ratio": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "tokens_in": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "signal_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "LlmCallPoint": {
+        "type": "object",
+        "required": [
+          "step_id",
+          "turn_id",
+          "segment_id",
+          "ts",
+          "model",
+          "context_tokens",
+          "context_delta",
+          "watermark",
+          "cache_hit_ratio",
+          "input",
+          "cache_read",
+          "cache_write",
+          "output",
+          "reasoning",
+          "stop_reason",
+          "latency_ms",
+          "ttft_ms",
+          "usage"
+        ],
+        "properties": {
+          "step_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turn_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "segment_id": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context_tokens": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "context_delta": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "watermark": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_hit_ratio": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "input": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_read": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "cache_write": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "output": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "reasoning": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latency_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "ttft_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Usage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "PageSegmentView": {
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentView"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PageTurnView": {
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TurnView"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PageLlmCallPoint": {
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LlmCallPoint"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }
