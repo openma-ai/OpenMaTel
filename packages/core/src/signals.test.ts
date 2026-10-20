@@ -13,6 +13,7 @@ const event = (
     status?: AgentEvent["status"];
     attrs?: Record<string, unknown>;
     content?: AgentEvent["content"];
+    error?: AgentEvent["error"];
   } = {},
 ): AgentEvent => ({
   schema: SCHEMA_VERSION,
@@ -27,6 +28,7 @@ const event = (
   status: options.status,
   attrs: options.attrs ?? {},
   content: options.content,
+  ...(options.error === undefined ? {} : { error: options.error }),
   source: { name: "test", format: "json" },
 });
 
@@ -39,18 +41,25 @@ const tool = (
     status?: AgentEvent["status"];
     tool_name?: string;
     input?: string;
+    output?: string;
+    error?: AgentEvent["error"];
   } = {},
 ): AgentEvent =>
   event(event_id, "tool.call", ts, {
     turn_id: options.turn_id,
     step_id,
     status: options.status ?? "ok",
+    error: options.error,
     attrs: {
       tool_name: options.tool_name ?? "bash",
       tool_kind: "execute",
       call_id: `call_${event_id}`,
     },
-    content: { capture: "full", input: { text: options.input ?? "ls -la" } },
+    content: {
+      capture: "full",
+      input: { text: options.input ?? "ls -la" },
+      ...(options.output === undefined ? {} : { output: { text: options.output } }),
+    },
   });
 
 const ofKind = (signals: Signal[], kind: Signal["kind"]): Signal[] =>
@@ -84,37 +93,172 @@ describe("detectSignals", () => {
     expect(ofKind(signals, "repeated_tool_failure")).toEqual([]);
   });
 
-  it("detects a tool/input loop regardless of the call status", () => {
-    const signals = detectSignals([
-      tool("ev_1", "st_1", "2026-01-01T00:00:01.000Z", { status: "ok" }),
-      tool("ev_2", "st_2", "2026-01-01T00:00:02.000Z", { status: "error" }),
-      tool("ev_3", "st_3", "2026-01-01T00:00:03.000Z", { status: "ok" }),
-    ]);
+  it("does not flag job_output polling when the output changes", () => {
+    const input = '{"job_id":"bash-218","timeout_ms":900000}';
+    const signals = detectSignals(
+      Array.from({ length: 6 }, (_, index) =>
+        tool(`ev_job_${index}`, `st_job_${index}`, `2026-01-01T00:00:0${index}.000Z`, {
+          tool_name: "job_output",
+          input,
+          output: `still running (${index})\n`,
+        }),
+      ),
+    );
 
-    expect(ofKind(signals, "loop")).toMatchObject([
+    expect(ofKind(signals, "loop")).toEqual([]);
+  });
+
+  it('does not flag write_stdin with empty chars when the output changes', () => {
+    const input = '{"session_id":"bash-218","chars":""}';
+    const signals = detectSignals(
+      Array.from({ length: 6 }, (_, index) =>
+        tool(`ev_stdin_${index}`, `st_stdin_${index}`, `2026-01-01T00:00:0${index}.000Z`, {
+          tool_name: "write_stdin",
+          input,
+          output: `waited ${index}ms, no new output\n`,
+        }),
+      ),
+    );
+
+    expect(ofKind(signals, "loop")).toEqual([]);
+  });
+
+  it("detects a run of the same tool, input and result with the maximal count", () => {
+    const signals = detectSignals(
+      Array.from({ length: 4 }, (_, index) =>
+        tool(`ev_${index}`, `st_${index}`, `2026-01-01T00:00:0${index}.000Z`, {
+          input: "pnpm test",
+          output: "all tests passed\n",
+        }),
+      ),
+    );
+
+    expect(ofKind(signals, "loop")).toEqual([
       {
         kind: "loop",
         turn_id: "turn_1",
-        step_ids: ["st_1", "st_2", "st_3"],
-        count: 3,
+        step_ids: ["st_0", "st_1", "st_2", "st_3"],
+        count: 4,
       },
     ]);
   });
 
-  it("detects a short step sequence repeated consecutively", () => {
+  it("does not flag the same edit when other tools are interleaved", () => {
+    const editInput = '{"file_path":"/tmp/a.ts","old_string":"a","new_string":"b"}';
+    const signals = detectSignals([
+      tool("ev_1", "st_1", "2026-01-01T00:00:01.000Z", {
+        tool_name: "edit",
+        input: editInput,
+        output: "updated",
+      }),
+      tool("ev_2", "st_2", "2026-01-01T00:00:02.000Z", { input: "pnpm test", output: "ok" }),
+      tool("ev_3", "st_3", "2026-01-01T00:00:03.000Z", {
+        tool_name: "edit",
+        input: editInput,
+        output: "updated",
+      }),
+      tool("ev_4", "st_4", "2026-01-01T00:00:04.000Z", {
+        tool_name: "read",
+        input: "README.md",
+        output: "contents",
+      }),
+      tool("ev_5", "st_5", "2026-01-01T00:00:05.000Z", {
+        tool_name: "edit",
+        input: editInput,
+        output: "updated",
+      }),
+      tool("ev_6", "st_6", "2026-01-01T00:00:06.000Z", { input: "git diff", output: "diff" }),
+      tool("ev_7", "st_7", "2026-01-01T00:00:07.000Z", {
+        tool_name: "edit",
+        input: editInput,
+        output: "updated",
+      }),
+    ]);
+
+    expect(ofKind(signals, "loop")).toEqual([]);
+  });
+
+  it("detects a short tool-call sequence repeated consecutively", () => {
     const steps = [
-      event("ev_a1", "llm.call", "2026-01-01T00:00:01.000Z", { step_id: "st_a1" }),
-      tool("ev_b1", "st_b1", "2026-01-01T00:00:02.000Z", { input: "one" }),
-      event("ev_a2", "llm.call", "2026-01-01T00:00:03.000Z", { step_id: "st_a2" }),
-      tool("ev_b2", "st_b2", "2026-01-01T00:00:04.000Z", { input: "two" }),
-      event("ev_a3", "llm.call", "2026-01-01T00:00:05.000Z", { step_id: "st_a3" }),
-      tool("ev_b3", "st_b3", "2026-01-01T00:00:06.000Z", { input: "three" }),
+      tool("ev_a1", "st_a1", "2026-01-01T00:00:01.000Z", {
+        tool_name: "read",
+        input: "a.txt",
+        output: "A",
+      }),
+      tool("ev_b1", "st_b1", "2026-01-01T00:00:02.000Z", {
+        tool_name: "bash",
+        input: "echo b",
+        output: "B",
+      }),
+      tool("ev_a2", "st_a2", "2026-01-01T00:00:03.000Z", {
+        tool_name: "read",
+        input: "a.txt",
+        output: "A",
+      }),
+      tool("ev_b2", "st_b2", "2026-01-01T00:00:04.000Z", {
+        tool_name: "bash",
+        input: "echo b",
+        output: "B",
+      }),
+      tool("ev_a3", "st_a3", "2026-01-01T00:00:05.000Z", {
+        tool_name: "read",
+        input: "a.txt",
+        output: "A",
+      }),
+      tool("ev_b3", "st_b3", "2026-01-01T00:00:06.000Z", {
+        tool_name: "bash",
+        input: "echo b",
+        output: "B",
+      }),
     ];
 
     const loops = ofKind(detectSignals(steps), "loop");
     expect(loops).toHaveLength(1);
     expect(loops[0]?.count).toBe(3);
     expect(loops[0]?.step_ids).toEqual(["st_a1", "st_b1", "st_a2", "st_b2", "st_a3", "st_b3"]);
+  });
+
+  it("does not flag calls whose results are missing", () => {
+    const signals = detectSignals(
+      Array.from({ length: 4 }, (_, index) =>
+        tool(`ev_missing_${index}`, `st_missing_${index}`, `2026-01-01T00:00:0${index}.000Z`, {
+          input: "ls -la",
+        }),
+      ),
+    );
+
+    expect(ofKind(signals, "loop")).toEqual([]);
+  });
+
+  it("compares the full input, not only its first characters", () => {
+    const prefix = `{"file_path":"/tmp/a.ts","content":"${"x".repeat(250)}`;
+    const steps = Array.from({ length: 4 }, (_, index) =>
+      tool(`ev_long_${index}`, `st_long_${index}`, `2026-01-01T00:00:0${index}.000Z`, {
+        tool_name: "edit",
+        input: `${prefix}${index}"}`,
+        output: "updated",
+      }),
+    );
+
+    expect(ofKind(detectSignals(steps), "loop")).toEqual([]);
+  });
+
+  it("reports separate runs of the same call separately", () => {
+    const signals = detectSignals([
+      tool("ev_1", "st_1", "2026-01-01T00:00:01.000Z", { input: "ls", output: "same" }),
+      tool("ev_2", "st_2", "2026-01-01T00:00:02.000Z", { input: "ls", output: "same" }),
+      tool("ev_3", "st_3", "2026-01-01T00:00:03.000Z", { input: "ls", output: "same" }),
+      tool("ev_4", "st_4", "2026-01-01T00:00:04.000Z", { input: "ls", output: "same" }),
+      tool("ev_break", "st_break", "2026-01-01T00:00:05.000Z", { input: "pwd", output: "/tmp" }),
+      tool("ev_5", "st_5", "2026-01-01T00:00:06.000Z", { input: "ls", output: "same" }),
+      tool("ev_6", "st_6", "2026-01-01T00:00:07.000Z", { input: "ls", output: "same" }),
+      tool("ev_7", "st_7", "2026-01-01T00:00:08.000Z", { input: "ls", output: "same" }),
+    ]);
+
+    expect(ofKind(signals, "loop")).toEqual([
+      { kind: "loop", turn_id: "turn_1", step_ids: ["st_1", "st_2", "st_3", "st_4"], count: 4 },
+      { kind: "loop", turn_id: "turn_1", step_ids: ["st_5", "st_6", "st_7"], count: 3 },
+    ]);
   });
 
   it("detects control interrupts and interrupted/cancelled turn ends", () => {
